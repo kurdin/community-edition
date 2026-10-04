@@ -65,7 +65,10 @@ Upgrading an existing v2.0 install keeps the same service and volume names.
 ClickHouse 23.3 data is upgraded in place to 24.12. The Postgres volume was
 created with Postgres 14, so either set `POSTGRES_VERSION=14` in `.env` or
 dump and restore it into 16. Both are covered in
-[deployment.md section 3.5](./deployment.md#35-upgrade-postgresql-14--16-or-stay-on-14).
+[deployment.md, step 4](./deployment.md#step-4-postgres-keep-14-or-move-to-16).
+The upgrade itself is a short sequence of scripts (backup, migrate, verify,
+then finalize or roll back); see
+[deployment.md section 3](./deployment.md#3-upgrading-an-existing-docker-install-without-data-loss).
 
 > [!NOTE]
 > Persistent ids (especially the IP + user-agent fallback) depart from

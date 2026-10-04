@@ -1,0 +1,5 @@
+# created by upgrade/backup.sh
+/backups/
+/upgrade.vars
+# local compose variables (PLAUSIBLE_SRC, POSTGRES_VERSION, ...)
+/.env

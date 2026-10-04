@@ -24,13 +24,17 @@ ch() {
 }
 
 echo "## PostgreSQL (plausible_db)"
-for table in users sites goals shared_links api_keys; do
+for table in users sites shared_links api_keys; do
   exists=$(pg "SELECT to_regclass('public.$table') IS NOT NULL")
   if [ "$exists" = "t" ]; then
     count=$(pg "SELECT count(*) FROM $table")
     echo "$table: $count"
   fi
 done
+# Distinct goals: a 2023 migration (goals_unique) deliberately deletes exact
+# duplicate goals, so the raw row count may drop while no goal is lost.
+goals=$(pg "SELECT count(*) FROM (SELECT DISTINCT site_id, page_path, event_name FROM goals) g")
+echo "goals (distinct): $goals"
 
 echo "counting events/sessions before $CUTOFF UTC" >&2
 echo

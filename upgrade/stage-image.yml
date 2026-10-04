@@ -1,0 +1,6 @@
+# Used by upgrade/migrate.sh to run the migrations of an official Plausible CE
+# release (STAGE_IMAGE) instead of the locally built fork image.
+services:
+  plausible:
+    image: ${STAGE_IMAGE:?set STAGE_IMAGE}
+    build: !reset null
