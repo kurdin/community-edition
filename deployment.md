@@ -256,18 +256,21 @@ for you.
 3. **The backup stays untouched until you finalize.** `rollback.sh`
    restores it exactly.
 
-**Rehearsed here:** on a v2.0-shaped dataset I ran:
-- the ClickHouse hops 23.3.7.5 → 23.8 → 24.3 → 24.8 → 24.12;
-- the `sessions_v2` engine conversion SQL;
-- the Postgres 14 → 16 restore;
-- `backup.sh`, `data-check.sh` and `rollback.sh`.
+**Rehearsed here:** this exact sequence of scripts was run on a v2.0-shaped
+dataset (real Postgres 14 and ClickHouse 23.3.7.5 volumes):
+- `backup.sh`, then `postgres-16.sh` and `migrate.sh` with every ClickHouse
+  hop, followed by a `migrate.sh` rerun that correctly skipped every stage;
+- the `sessions_v2` engine conversion SQL on 23.3, 24.3 and 24.12;
+- `verify.sh`, which passed with the expected changes (deduplicated goals,
+  renamed sources) and failed when 3 events were deleted on purpose;
+- `rollback.sh`, twice, both times identical to the baseline;
+- `finalize.sh`, which refused to delete the backup when the data didn't
+  match and succeeded once it did.
 
-The data was identical at every check.
-
-**Not rehearsed here:** the staged migrations with the official release
-images (they couldn't be downloaded in the test environment). They are the
-same migrations every upstream CE install ran when upgrading release by
-release.
+**Not rehearsed here:** in the test environment, stand-ins replaced the
+official release images and the fork image (they couldn't be downloaded or
+built there). The stages' migrations are the same ones every upstream CE
+install ran when upgrading release by release.
 
 ### Step 1: prepare (app still online)
 
@@ -470,8 +473,9 @@ leftovers:
 ./upgrade/finalize.sh
 ```
 
-[`upgrade/finalize.sh`](./upgrade/finalize.sh) shows what it will delete and
-asks you to type `delete`:
+[`upgrade/finalize.sh`](./upgrade/finalize.sh) first re-checks the data
+against the pre-upgrade baseline, and refuses to delete anything if it
+differs. Then it shows what it will delete and asks you to type `delete`:
 * the backup directory;
 * the old `sessions_v2` table kept by the engine conversion (only once
   `sessions_v2` is confirmed converted);

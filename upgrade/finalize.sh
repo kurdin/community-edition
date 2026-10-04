@@ -5,7 +5,9 @@
 #   ./upgrade/finalize.sh          # asks for confirmation
 #   ./upgrade/finalize.sh --yes
 #
-# Run from the install directory. It removes:
+# Run from the install directory. It first re-checks the data against the
+# pre-upgrade baseline and refuses to delete anything if it differs. Then it
+# removes:
 #   * the backup directory ($BACKUP from upgrade.vars)
 #   * the ClickHouse table left by the sessions_v2 engine conversion
 #     (sessions_v2_tmp_versioned or sessions_v2_backup)
@@ -27,6 +29,14 @@ if [ "${1:-}" != "--yes" ]; then
   printf 'Type "delete" to continue: '
   read -r answer < /dev/tty
   [ "$answer" = "delete" ] || { echo "aborted"; exit 1; }
+fi
+
+# last safety net: the data must still match the baseline taken before the upgrade
+SCRIPTS_DIR=$(cd "$(dirname "$0")" && pwd)
+"$SCRIPTS_DIR/data-check.sh" "$(cat "$BACKUP/cutoff.txt")" > "$BACKUP/finalize-check.txt"
+if ! diff "$BACKUP/before.txt" "$BACKUP/finalize-check.txt"; then
+  echo "data differs from the pre-upgrade baseline (diff above): not deleting the backup" >&2
+  exit 1
 fi
 
 engine=$(docker compose exec -T plausible_events_db clickhouse-client -d plausible_events_db \
