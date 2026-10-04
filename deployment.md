@@ -122,8 +122,8 @@ You can switch later at any time.
 
 `PLAUSIBLE_SRC` in `.env` (written in 2.2) decides what gets built. Compose
 reads `.env` for variable substitution; it is a different file from
-`plausible-conf.env`. Without it the default is
-`https://github.com/kurdin/plausible-analytics-deviceid.git#master`. Point it
+`plausible-conf.env`. Without it the default is the feature branch
+`https://github.com/kurdin/plausible-analytics-deviceid.git#claude/determined-cerf-dqrxgj`. Point it
 at any branch, tag or commit, or at a local checkout:
 
 ```sh
@@ -640,7 +640,7 @@ Compose variables (in `.env`, next to `docker-compose.yml`):
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `PLAUSIBLE_SRC` | `https://github.com/kurdin/plausible-analytics-deviceid.git#master` | Build context for the app image (git URL with `#ref`, or a local path). |
+| `PLAUSIBLE_SRC` | `https://github.com/kurdin/plausible-analytics-deviceid.git#claude/determined-cerf-dqrxgj` | Build context for the app image (git URL with `#ref`, or a local path). |
 | `POSTGRES_VERSION` | `16` | Postgres major version. Use `14` to keep an existing v14 volume. |
 | `CLICKHOUSE_VERSION` | `24.12` | ClickHouse image version. |
 | `COMPOSE_PROJECT_NAME` | directory name | Pins the volume name prefix if you move the directory. |

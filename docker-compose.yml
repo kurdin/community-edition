@@ -51,10 +51,10 @@ services:
     # Built from the persistent-tracking fork instead of the pre-built image.
     # Set PLAUSIBLE_SRC in .env to a git URL with #branch/#tag, or to a local
     # checkout (e.g. PLAUSIBLE_SRC=../plausible-analytics-deviceId).
-    # NOTE: the #master default only contains the persistent tracking feature
-    # once the fork's feature branch has been merged into master.
+    # The default points at the feature branch; change it to #master (or a
+    # tag) once that branch has been merged into the fork's master.
     build:
-      context: ${PLAUSIBLE_SRC:-https://github.com/kurdin/plausible-analytics-deviceid.git#master}
+      context: ${PLAUSIBLE_SRC:-https://github.com/kurdin/plausible-analytics-deviceid.git#claude/determined-cerf-dqrxgj}
       args:
         MIX_ENV: ce
     image: plausible-deviceid:local

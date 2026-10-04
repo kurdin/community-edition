@@ -55,11 +55,11 @@ $ echo 'PLAUSIBLE_SRC=https://github.com/kurdin/plausible-analytics-deviceid.git
 $ docker compose up -d --build    # builds the fork from GitHub
 ```
 
-`PLAUSIBLE_SRC` picks the source to build. Use the branch above until the
-feature is merged into the fork's `master` (the compose default), or a local
-checkout such as `PLAUSIBLE_SRC=../plausible-analytics-deviceId`. Building
-`master` before the merge gives plain upstream Plausible, which silently
-ignores `ENABLE_PERSISTENT_TRACKING`.
+`PLAUSIBLE_SRC` picks the source to build. The compose default is the
+feature branch shown above. Other options are a tag, or a local checkout such
+as `PLAUSIBLE_SRC=../plausible-analytics-deviceId`. Don't build the fork's
+`master` before the feature is merged into it: that's plain upstream
+Plausible, which silently ignores `ENABLE_PERSISTENT_TRACKING`.
 
 Upgrading an existing v2.0 install keeps the same service and volume names.
 ClickHouse 23.3 data is upgraded in place to 24.12. The Postgres volume was
