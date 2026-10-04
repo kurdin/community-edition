@@ -12,13 +12,18 @@
 # imports migration). Instead, this goes through the official releases in
 # order, each with the ClickHouse version it was released for:
 #
-#   ClickHouse 23.8 -> 24.3,   then Plausible CE v2.1.1 -> v2.1.5
+#   ClickHouse 23.8 -> 24.3,   then Plausible CE v2.1.0 -> v2.1.1 -> v2.1.5
 #   ClickHouse 24.8 -> 24.12,  then Plausible CE v3.0.1 -> v3.1.0 -> v3.2.0
 #   then this fork (image plausible-deviceid:local, built beforehand)
 #
 # After every step it checks that the event and session counts still match
 # the backup baseline. It stops at the first error. Rerunning is safe:
 # completed steps are recorded in $BACKUP/migrate.done and skipped.
+#
+# Why v2.1.0 first: releases before v2.1.2 run all Postgres migrations before
+# the ClickHouse ones. v2.1.1's site imports migration reads ClickHouse
+# columns/tables (import_id, imported_custom_events) that only v2.1.0's
+# ClickHouse migrations create.
 # ClickHouse versions older than the one you already run are skipped too.
 # Prints "MIGRATIONS OK" at the end.
 set -eu
@@ -38,10 +43,15 @@ docker image inspect plausible-deviceid:local > /dev/null 2>&1 || {
   exit 1
 }
 
-# compose files for running an upstream release image instead of the fork
-stage_files="-f docker-compose.yml"
-if [ -f docker-compose.override.yml ]; then stage_files="$stage_files -f docker-compose.override.yml"; fi
-stage_files="$stage_files -f $STAGE_FILE"
+# docker compose with an upstream release image instead of the fork
+# (quoted, so install paths with spaces work)
+stage_compose() {
+  if [ -f docker-compose.override.yml ]; then
+    docker compose -f docker-compose.yml -f docker-compose.override.yml -f "$STAGE_FILE" "$@"
+  else
+    docker compose -f docker-compose.yml -f "$STAGE_FILE" "$@"
+  fi
+}
 
 expected_events=$(sed -n 's/^events_v2 rows: //p' "$BACKUP/before.txt")
 expected_sessions=$(sed -n 's/^sessions_v2 sessions: //p' "$BACKUP/before.txt")
@@ -99,7 +109,7 @@ migrate_with() {
   if done_step "migrate-$image"; then return; fi
   echo "-> migrating with $image (ClickHouse $ch_current)"
   STAGE_IMAGE="$image" CLICKHOUSE_VERSION="$ch_current" \
-    docker compose $stage_files run --rm plausible db migrate
+    stage_compose run --rm plausible db migrate
   check_counts
   mark_done "migrate-$image"
 }
@@ -108,6 +118,7 @@ echo "-> starting Postgres"
 docker compose up -d --wait plausible_db
 
 clickhouse_to 23.8 24.3
+migrate_with "$RELEASES:v2.1.0"
 migrate_with "$RELEASES:v2.1.1"
 migrate_with "$RELEASES:v2.1.5"
 

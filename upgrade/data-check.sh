@@ -6,9 +6,10 @@
 #   ./upgrade/data-check.sh "2026-10-04 12:00:00" > after.txt
 #   diff before.txt after.txt
 #
-# The optional argument is a UTC cutoff timestamp: only events and sessions
-# older than it are counted, so traffic ingested after the upgrade does not
-# show up as a difference. Use the time you stopped the old `plausible`
+# The optional argument is a UTC cutoff timestamp: only rows older than it are
+# counted (Postgres rows by inserted_at, events and sessions by time), so
+# traffic, users or sites added after the upgrade do not show up as a
+# difference. Use the time you stopped the old `plausible`
 # container. Run it from the directory that holds docker-compose.yml.
 # It aborts (non-zero exit) if a database is unreachable or a query fails.
 set -eu
@@ -27,13 +28,13 @@ echo "## PostgreSQL (plausible_db)"
 for table in users sites shared_links api_keys; do
   exists=$(pg "SELECT to_regclass('public.$table') IS NOT NULL")
   if [ "$exists" = "t" ]; then
-    count=$(pg "SELECT count(*) FROM $table")
+    count=$(pg "SELECT count(*) FROM $table WHERE inserted_at < '$CUTOFF'")
     echo "$table: $count"
   fi
 done
 # Distinct goals: a 2023 migration (goals_unique) deliberately deletes exact
 # duplicate goals, so the raw row count may drop while no goal is lost.
-goals=$(pg "SELECT count(*) FROM (SELECT DISTINCT site_id, page_path, event_name FROM goals) g")
+goals=$(pg "SELECT count(*) FROM (SELECT DISTINCT site_id, page_path, event_name FROM goals WHERE inserted_at < '$CUTOFF') g")
 echo "goals (distinct): $goals"
 
 echo "counting events/sessions before $CUTOFF UTC" >&2

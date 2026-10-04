@@ -78,7 +78,9 @@ how *new* events are identified. Historical data is never rewritten.
         plausible_events_db:
           condition: service_healthy
   ```
-* Docker Engine 24+ with the Compose v2 plugin (`docker compose version`).
+* Docker Engine 24+ with Docker Compose **v2.24.4 or newer**
+  (`docker compose version`), needed for the `!reset` / `!override` tags
+  used in overrides and for `pull --ignore-buildable`.
 * Outbound internet access during the build: github.com, hex.pm
   (repo.hex.pm, builds.hex.pm), registry.npmjs.org, dl-cdn.alpinelinux.org
   and download.db-ip.com (free geolocation database).
@@ -260,7 +262,7 @@ can always roll back to the state from step 2.
 | App | `plausible/analytics:v2.0` | built from the fork (latest Plausible CE) |
 | Postgres | 14 | 16 (dump/restore), or stay on 14 |
 | ClickHouse | 23.3 | 24.12, upgraded in place through 23.8 → 24.3 → 24.8 |
-| Postgres schema | v2.0 | migrated through the official releases v2.1.1 → v2.1.5 → v3.0.1 → v3.1.0 → v3.2.0, then the fork |
+| Postgres schema | v2.0 | migrated through the official releases v2.1.0 → v2.1.1 → v2.1.5 → v3.0.1 → v3.1.0 → v3.2.0, then the fork |
 | ClickHouse schema | v2.0 | migrated along the same path (new columns, `sessions_v2` engine conversion, source-name normalisation) |
 
 **Why migrate in stages?** Some Plausible data migrations load the
@@ -270,6 +272,11 @@ columns that later migrations haven't created yet, and fail. Running each
 official release's own migrations in order avoids this, and each release
 runs with the ClickHouse version it was released for. `migrate.sh` does this
 for you.
+
+It starts at **v2.1.0** on purpose. Releases before v2.1.2 run all Postgres
+migrations before the ClickHouse ones, and v2.1.1's site-imports migration
+reads ClickHouse columns (`import_id`, `imported_custom_events`) that v2.1.0's
+ClickHouse migrations create.
 
 ### How "no data loss" is guaranteed
 
@@ -326,7 +333,7 @@ git checkout "deviceid/$DEPLOY_REF" -- upgrade/
 docker build -t plausible-deviceid:local "https://github.com/kurdin/plausible-analytics-deviceid.git#$APP_REF"
 
 # c) pre-download everything the upgrade needs, so the downtime is shorter
-for v in v2.1.1 v2.1.5 v3.0.1 v3.1.0 v3.2.0; do docker pull "ghcr.io/plausible/community-edition:$v"; done
+for v in v2.1.0 v2.1.1 v2.1.5 v3.0.1 v3.1.0 v3.2.0; do docker pull "ghcr.io/plausible/community-edition:$v"; done
 for v in 23.8 24.3 24.8 24.12; do docker pull "clickhouse/clickhouse-server:$v-alpine"; done
 docker pull postgres:16-alpine; docker pull alpine
 ```
@@ -442,7 +449,7 @@ files are incompatible with server") without changing it.
 
 [`upgrade/migrate.sh`](./upgrade/migrate.sh):
 1. Upgrades ClickHouse to 23.8 and 24.3.
-2. Runs the migrations of Plausible CE v2.1.1 and v2.1.5.
+2. Runs the migrations of Plausible CE v2.1.0, v2.1.1 and v2.1.5.
 3. Upgrades ClickHouse to 24.8 and 24.12.
 4. Runs the migrations of v3.0.1, v3.1.0, v3.2.0 and finally the fork.
 
@@ -502,7 +509,11 @@ leftovers:
 
 [`upgrade/finalize.sh`](./upgrade/finalize.sh) first re-checks the data
 against the pre-upgrade baseline, and refuses to delete anything if it
-differs. Then it shows what it will delete and asks you to type `delete`:
+differs. Only data from before the upgrade is compared: Postgres rows by
+`inserted_at`, events by timestamp. New users, sites or traffic don't count.
+If a difference is expected, for example a site you deleted after the
+upgrade, review the printed diff and run
+`./upgrade/finalize.sh --ignore-data-check`. Then it shows what it will delete and asks you to type `delete`:
 * the backup directory;
 * the old `sessions_v2` table kept by the engine conversion (only once
   `sessions_v2` is confirmed converted);
@@ -522,7 +533,8 @@ Restoring the backup returns the install to its exact state when
 > [!WARNING]
 > A rollback **discards everything written after the upgrade started**: new
 > events, and any sites, users or goals created since. The script
-> archives the current state into `$BACKUP/pre-rollback/` first, so nothing
+> archives the current state into a new `$BACKUP/pre-rollback-<time>/`
+> directory first (one per attempt, so a retry never overwrites it), so nothing
 > is destroyed. Copy that data over by hand later if you need it.
 
 Run it from your install directory:
@@ -534,7 +546,8 @@ Run it from your install directory:
 `rollback.sh` (copied into the backup by `backup.sh`, so it's still there
 after the old files are restored) refuses to touch anything unless all three
 archives, the config backup, the baseline and the cutoff exist. It then:
-1. Archives the current state to `$BACKUP/pre-rollback/`.
+1. Archives the current state to a new `$BACKUP/pre-rollback-<time>/`
+   directory (one per attempt).
 2. Restores the volumes **in place** (they keep their Compose labels).
 3. Restores `docker-compose.yml`, `plausible-conf.env`,
    `docker-compose.override.yml`, `.env` and `clickhouse/` exactly as they

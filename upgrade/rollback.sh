@@ -6,7 +6,8 @@
 #
 # Run from the install directory. Aborts before touching anything unless all
 # archives and the config backup exist. Archives the current (post-upgrade)
-# state to $BACKUP/pre-rollback first, restores volumes in place, restores the
+# state to $BACKUP/pre-rollback-<time> first (a new directory per attempt, so
+# a retried rollback never overwrites an earlier recovery copy), restores volumes in place, restores the
 # config files, starts only the databases and compares the data with the
 # pre-upgrade baseline. Start the app afterwards with `docker compose up -d`.
 set -eu
@@ -23,15 +24,17 @@ for f in config/docker-compose.yml config/plausible-conf.env config/clickhouse b
   [ -e "$BACKUP/$f" ] || { echo "missing $BACKUP/$f, aborting" >&2; exit 1; }
 done
 
-echo "-> archiving the current state to $BACKUP/pre-rollback"
-mkdir -p "$BACKUP/pre-rollback"
+PRE_ROLLBACK="$BACKUP/pre-rollback-$(date -u +%Y%m%dT%H%M%SZ)"
+[ ! -e "$PRE_ROLLBACK" ] || { echo "$PRE_ROLLBACK already exists, try again in a second" >&2; exit 1; }
+echo "-> archiving the current state to $PRE_ROLLBACK"
+mkdir -p "$PRE_ROLLBACK"
 docker compose stop
 for v in db-data event-data event-logs; do
-  docker run --rm -v "${PROJECT}_${v}:/volume:ro" -v "$BACKUP/pre-rollback:/backup" "$HELPER_IMAGE" \
+  docker run --rm -v "${PROJECT}_${v}:/volume:ro" -v "$PRE_ROLLBACK:/backup" "$HELPER_IMAGE" \
     tar -C /volume -czf "/backup/${v}.tar.gz" .
 done
 for f in docker-compose.yml docker-compose.override.yml plausible-conf.env .env; do
-  if [ -f "$f" ]; then cp "$f" "$BACKUP/pre-rollback/"; fi
+  if [ -f "$f" ]; then cp "$f" "$PRE_ROLLBACK/"; fi
 done
 
 echo "-> restoring volumes in place"

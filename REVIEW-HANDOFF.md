@@ -1,186 +1,286 @@
-# Review handoff: persistent tracking fork + lossless upgrade flow (round 3)
+# Combined review handoff: persistent tracking, lossless upgrade, DAU/WAU/MAU
 
-You are reviewing fixes made in response to two earlier reviews. Verify that
-each fix is correct and complete, and look for new problems the fixes may
-have introduced. **Report findings only; don't change files.**
+This is a single, self-contained handoff for everything built so far, plus all
+review findings and their fixes (rounds 1–6). You're reviewing the final
+state. **Report findings only; don't change files.**
 
-## Repositories and what to diff
+## 1. Repositories, branch, commits
 
-Both repos are on branch **`claude/determined-cerf-dqrxgj`**, pushed to GitHub:
-
-| Repo | Base of feature | Last reviewed | Current head |
-| --- | --- | --- | --- |
-| `kurdin/plausible-analytics-deviceId` (Elixir app fork) | `d21298d` | `b265b74` | `534f84c` |
-| `kurdin/community-edition` (Docker deployment) | `06f122f` | `337c5a3` | `a4f7aeb` |
+Both repos are on branch **`claude/determined-cerf-dqrxgj`**, pushed to GitHub.
 
 ```sh
 git fetch origin claude/determined-cerf-dqrxgj && git checkout claude/determined-cerf-dqrxgj
-# fork: changes since the last review / whole feature
-git diff b265b74..534f84c
-git diff d21298d..534f84c
-# community-edition: changes since the last review / whole feature
-git diff 337c5a3..a4f7aeb
-git diff 06f122f..a4f7aeb
 ```
 
-## Feature recap (unchanged intent)
+### `kurdin/plausible-analytics-deviceId` (Elixir app fork; base `d21298d` = upstream master)
 
-- `ENABLE_PERSISTENT_TRACKING` (default `false`): when true, `user_id` comes
-  from `lib/plausible/ingestion/persistent_id.ex` instead of the daily
-  rotating salt. When false, upstream behaviour must be unchanged.
-- **Tier 1:** the custom prop `PERSISTENT_TRACKING_DEVICE_ID_PROP` (default
-  `deviceId`) gives `SipHash(key, encode(["device", site_id, device_id]))`.
-- **Tier 2:** without the prop, `SipHash(key, encode(["fp", site_id, ua, ip]))`.
-- In EE builds the replay session id is appended as an extra field.
-  `key = sha256(PERSISTENT_SALT_SECRET)[0..16]`.
-- `deviceId` is **intentionally kept** as a normal custom prop (owner
-  decision).
-- No stats query changes: visitors are already `uniq(user_id)` over the
-  range.
+| Commit | Content |
+| --- | --- |
+| `cc34b04` | A. Persistent tracking (deviceId / persistent salt), fork compose + deploy docs |
+| `b265b74` | Link to `deployment.md` |
+| `534f84c` | Round 2/3 fixes: EE id collision (length-prefixed hashing), config/doc fixes |
+| `66d99ba` | C. DAU/WAU/MAU metrics, persistent tracking periods, dashboard tiles |
+| `b26b074` | Round 5 fixes for DAU/WAU/MAU (render loop, reported days, warnings, periods) |
+| `712bd27` | Round 6 doc fixes (npm tracker example, arm64 override) |
 
-## What changed since the last review
+Whole feature: `git diff d21298d..712bd27`. By area: `git diff d21298d..534f84c` (A),
+`git diff 534f84c..712bd27` (C and later fixes).
 
-### Fork (`b265b74..534f84c`, one commit `534f84c`)
+### `kurdin/community-edition` (Docker deployment; base `06f122f` = upstream v2.0)
 
-| # | Finding | Fix | Where |
-| --- | --- | --- | --- |
-| F1 | EE collision: the replay id was concatenated to the device id (`device-1`+`23` = `device-12`+`3` = `device-123`) | Every field is length-prefixed (`"<bytes>:<field>"`). The replay id is a separate field (none when nil) | `persistent_id.ex:58-79`; test `persistent_id_test.exs:107` |
-| F2 | `low-resources.xml` profile settings ignored under `config.d` | Split: `low-resources.xml` (server: `mark_cache_size`) + `default-profile-low-resources-overrides.xml` (`users.d`) | `deploy/clickhouse/*`, `docker-compose.yml` comments |
-| F3 | Healthcheck timing too tight for ClickHouse after a version change; `pg_isready` passes during initdb | `pg_isready -h 127.0.0.1`, `interval: 10s`, CH `retries: 60` | `docker-compose.yml` |
-| F4 | `MAILER_EMAIL=plausible@example.com` overrode the sane default | Commented out (default is `plausible@<BASE_URL host>`); noted that `bytemark/smtp` is amd64-only | `plausible-conf.env.example` |
-| F5 | Docs implied volumes are reused from any directory | Explain the Compose project prefix and `COMPOSE_PROJECT_NAME` / `POSTGRES_VERSION=14` | `docker-compose.yml` header, `deploy/README.md` |
-| F6 | ClickHouse checked before the 5s ingest flush | `sleep 6` | `deploy/README.md` |
-| F7 | Moduledoc overstated privacy | Notes that the device id is still stored as a prop | `persistent_id.ex` moduledoc |
+| Commit | Content |
+| --- | --- |
+| `fc2135b` | Compose builds the fork; env, ClickHouse configs, README |
+| `337c5a3` | `deployment.md` (install / upgrade / rollback) + `upgrade/data-check.sh` |
+| `f97402e`, `d98e1cf` | Round 2 fixes; data-changing steps moved into self-checking scripts |
+| `59efeb5`, `5a33bc4` | B. Script flow `backup → migrate (staged) → verify → finalize/rollback` |
+| `a4f7aeb` | Default `PLAUSIBLE_SRC` = feature branch |
+| `c6f45ef`…`d5cbc53` | Handoffs; DAU/WAU/MAU docs |
+| HEAD | Round 6 fixes (v2.1.0 stage, rollback archives, cutoff for Postgres counts, quoting, Compose minimum) + this file |
 
-Note: the length-prefixed encoding changes the hash input format compared
-with `cc34b04`. Nothing has been deployed, so no ids need to stay stable
-across this change.
+Whole feature: `git diff 06f122f..HEAD`.
 
-### community-edition (`337c5a3..a4f7aeb`, 5 commits)
+## 2. What was built
 
-**Design change: the upgrade is now a script flow** (see `deployment.md` §3):
+### A. Opt-in persistent visitor ids (fork)
+- **Flag:** `ENABLE_PERSISTENT_TRACKING` (default `false`). When off, the upstream
+  daily-salt code path is unchanged.
+- **Config:** `config/runtime.exs`, `config/config.exs`.
+  - `PERSISTENT_SALT_SECRET` is required when enabled, at least 16 bytes;
+    boot fails otherwise.
+  - `PERSISTENT_TRACKING_DEVICE_ID_PROP` defaults to `deviceId`.
+- **Ids** (`lib/plausible/ingestion/persistent_id.ex`, wired in
+  `lib/plausible/ingestion/event.ex` `put_user_id/2`, `register_session/2`):
+  - Tier 1: `SipHash(key, encode(["device", site_id, device_id]))`.
+  - Tier 2: `SipHash(key, encode(["fp", site_id, ua, ip]))`.
+  - EE adds `replay_session_id` as an extra field.
+  - `encode/1` length-prefixes every field.
+  - `key = sha256(secret)[0..16]`.
+  - `user_id` stays a UInt64; the schema is unchanged.
+- **Prop kept:** `deviceId` is deliberately kept as a normal custom prop
+  (owner decision).
+- **Queries:** no stats query changes. `visitors` is already
+  `uniq(user_id)` over the range.
+- **Tests:** `test/plausible/ingestion/persistent_id_test.exs`,
+  `persistent_tracking_test.exs`.
 
-```text
-upgrade/backup.sh    -> "BACKUP OK"        config + pg_dump + volume tars + data baseline, writes ./upgrade.vars
-(switch files: git checkout of the branch, merge plausible-conf.env)
-upgrade/postgres-16.sh (optional) -> "POSTGRES 16 RESTORE OK"
-upgrade/migrate.sh   -> "MIGRATIONS OK"    CH 23.8->24.3, CE v2.1.1->v2.1.5, CH 24.8->24.12, CE v3.0.1->v3.1.0->v3.2.0, fork
-docker compose up -d && upgrade/verify.sh -> "UPGRADE VERIFIED"
-"$BACKUP/rollback.sh" -> "ROLLBACK DATA OK"   |   upgrade/finalize.sh -> "FINALIZED" (deletes the backup)
-```
+### B. Deployment and lossless upgrade (community-edition; fork mirrors compose)
+- **`docker-compose.yml`:**
+  - builds the fork via `PLAUSIBLE_SRC` (default: the feature branch);
+  - Postgres `${POSTGRES_VERSION:-16}`, ClickHouse `${CLICKHOUSE_VERSION:-24.12}`;
+  - TCP `pg_isready` healthcheck; generous ClickHouse healthcheck;
+  - `CLICKHOUSE_SKIP_USER_SETUP=1`;
+  - `plausible-data` volume;
+  - optional low-resources config split between `config.d` and `users.d`.
+- **`deployment.md`:** install, the upgrade from v2.0, rollback, updates,
+  backups, troubleshooting, configuration.
+- **Upgrade scripts** (`upgrade/`). Each one is `set -eu`, verifies its own
+  output and ends with an explicit OK line.
+  - `backup.sh`:
+    - writes the config files, `pg_dump -Fc`, cold volume tars and a
+      baseline (`before.txt`, `cutoff.txt`) into `./backups/<ts>`
+      (`BACKUP_DIR` overrides);
+    - writes `upgrade.vars`.
+  - `postgres-16.sh`: optional 14 → 16 dump/restore. It keeps a
+    `<project>_db-data-pg14` volume copy.
+  - `migrate.sh`:
+    - ClickHouse 23.8 → 24.3, then the official images **v2.1.0 → v2.1.1 →
+      v2.1.5**;
+    - ClickHouse 24.8 → 24.12, then **v3.0.1 → v3.1.0 → v3.2.0**, then the
+      fork;
+    - checks counts after each stage, can be resumed
+      (`$BACKUP/migrate.done`), never downgrades ClickHouse;
+    - runs stage images through `upgrade/stage-image.yml`.
+  - `verify.sh`: readiness check plus `data-check.sh` diffed against the
+    baseline.
+  - `rollback.sh`: archives the current state to a new
+    `pre-rollback-<ts>/`, restores the volumes in place and the config files
+    exactly, starts only the databases, then diffs the data.
+  - `finalize.sh`:
+    - re-checks the data first (`--ignore-data-check` for expected
+      differences);
+    - checks `sessions_v2` was converted;
+    - deletes the backup and the leftovers;
+    - confirms first (`--yes` skips the prompt).
+  - `data-check.sh`:
+    - Postgres counts (users, sites, shared links, api keys, distinct
+      goals), counting only rows with `inserted_at < cutoff`;
+    - event and session counts, and per-site
+      `count, uniq(user_id), sum(cityHash64(...))` before the cutoff;
+    - imported rows.
 
-| # | Finding | Fix | Where |
-| --- | --- | --- | --- |
-| C1 | (P1) The default build used fork `master`, which lacks the feature | Default `PLAUSIBLE_SRC` = `…deviceid.git#claude/determined-cerf-dqrxgj`; README/guide updated | `docker-compose.yml:57`, `README.md`, `deployment.md` §2.4, §8 |
-| C2 | (P1) A direct v2.0 → latest jump fails: `20240528115149_migrate_site_imports` preloads today's `Plausible.Site` | Staged migrations through the official `ghcr.io/plausible/community-edition` images; must start at **v2.1.1** because v2.1.5's `Site` already has `installation_meta`, `team_id`, `scroll_depth_visible_at` | `upgrade/migrate.sh`, `upgrade/stage-image.yml`, `deployment.md` §3 "Why migrate in stages?" |
-| C3 | (P1) Rollback lost `.env`/override, possibly changing the project name | `backup.sh` saves compose, override, env, `.env` and `clickhouse/`; `rollback.sh` restores them exactly, including absence | `upgrade/backup.sh`, `upgrade/rollback.sh` |
-| C4 | Rollback with unset `$BACKUP` could delete live volumes | All mutating steps are `set -eu` scripts reading `upgrade.vars` with `:?` guards; rollback aborts unless every archive and the baseline exist, archives the current state to `pre-rollback/` first, and restores volumes **in place** (`find -delete` + untar; keeps Compose labels) | `upgrade/rollback.sh` |
-| C5 | Heredoc `sh <<EOF` blocks were broken (`docker compose exec` reads stdin) | Replaced by script files; every `exec` call redirects stdin | `upgrade/*.sh` |
-| C6 | A failed volume archive went unnoticed (Docker Hub 429 during the test) | `backup.sh` checks each archive is non-empty and `tar -t` readable, and `pg_restore --list` works | `upgrade/backup.sh` |
-| C7 | `data-check.sh` hid query failures; `uniqExact` used too much memory | Every query result is assigned before use (`set -e` catches failures); per site: `count, uniq(user_id), sum(cityHash64(user_id, session_id, timestamp, name, pathname))` | `upgrade/data-check.sh` |
-| C8 | Goals dedup (`20230914071245_goals_unique`) made the check fail falsely | Compares `count(DISTINCT site_id, page_path, event_name)` | `upgrade/data-check.sh:37` |
-| C9 | Routine backup used an unset `$PROJECT` | Resolved from the container label inside the block | `deployment.md` §6 |
-| C10 | `docker compose pull` fails on the buildable image | `pull --ignore-buildable` | `deployment.md` §5.3 |
-| C11 | The image build happened during downtime | Built in step 1 while the old app is online (`docker build -t plausible-deviceid:local <git url>`) | `deployment.md` §3 step 1 |
-| C12 | `finalize.sh` could delete the backup after data loss | Re-runs `data-check.sh` against the baseline and refuses on any diff; drops leftover tables only if `sessions_v2` is `VersionedCollapsingMergeTree`; asks for confirmation (`--yes` skips it) | `upgrade/finalize.sh:36-46` |
-| C13 | `migrate.sh` rerun safety | Progress in `$BACKUP/migrate.done`; finished stages skipped; never starts an older ClickHouse than the data has (start version recorded from the old container's image, or `CLICKHOUSE_START`) | `upgrade/migrate.sh` |
-| C14 | Stale v2.0 README defaults; `upgrade/postgres.md` pointer; "migrations never discard" claim; arm64 mail; `plausible.init()` double call; build hosts list | Banner + corrected defaults; pointer to step 4; claim reworded (`custom_domains` dropped, empty imports removed, sources normalised); tested `mail: !reset null` override; edit the existing `init()`; adds `download.db-ip.com` | `README.md`, `deployment.md` |
-| C15 | Low-resources / healthchecks / `MAILER_EMAIL` | Same as F2–F4 | `docker-compose.yml`, `clickhouse/*`, `plausible-conf.env` |
+### C. DAU / WAU / MAU (fork)
+- **Definitions:**
+  - `dau` = unique users on day D; `wau` = the 7 days ending on D; `mau` =
+    the 30 days ending on D;
+  - approximate `uniq`.
+  - Values reported: the last day (or today) with no dimension; each
+    bucket's last day for `time:week|month`; every day for `time:day`.
+- **SQL** (`lib/plausible/stats/sql/active_users.ex`):
+  - `reported_days/2` lists the days to compute.
+  - Per-day `uniqState(user_id)` comes from the regular
+    `SQL.QueryBuilder` on a derived query: internal metric
+    `:user_id_state`, `time:day`, range starting 29 days before the first
+    reported day, imports off, `:no_sampling`.
+  - Then `ARRAY JOIN range(0, 30)` with `uniqMergeIf` per window, limited to
+    the reported days.
+  - Bucketing uses `argMax`.
+- **Routing:** `SQL.QueryBuilder.build/2` sends queries with only
+  active-user metrics straight here.
+- **Validation** (`lib/plausible/stats/query_builder.ex`):
+  - only these metrics in a query;
+  - at most one dimension, from `time:day|week|month` (generic `time`
+    rejected);
+  - no realtime.
+- **Imports:** `Imported.schema_supports_query?` returns false, which gives
+  `unsupported_query`.
+- **Accuracy warning:**
+  - New table `persistent_tracking_periods` (migrations `20261005090000`,
+    `20261005090001`, the latter a unique partial index allowing one open
+    period).
+  - `Plausible.Ingestion.PersistentId.Periods`:
+    - `record_boot/1` runs as a Task in `application.ex` (disabled in the
+      test config);
+    - `coverage/3`;
+    - `PERSISTENT_TRACKING_SINCE` seeds earlier installs; it ends at the
+      first recorded period, and an empty value counts as unset.
+  - `QueryBuilder.set_active_users_coverage/1` anchors on the reported days
+    and clamps to the native stats start.
+  - `QueryResult.metric_warning/2` emits `persistent_tracking_partial`.
+- **Dashboard:**
+  - `data-persistent-tracking` → `site-context.tsx`;
+  - `fetch-top-stats.ts` makes a separate `active-users` request and merges
+    it via `mergeActiveUsersData`, memoized on the stable `data`
+    references; placeholder data and mismatched comparisons aren't merged;
+  - `isGraphableMetric` (day/week/month only);
+  - `visitor-graph.tsx` graphs visitors on hour/minute and keeps the stored
+    selection while active users load;
+  - labels, formatters, and the `*` warning text.
+- **Tests:**
+  - `test/plausible/stats/query/query_active_users_test.exs`
+  - `test/plausible_web/controllers/api/external_stats_controller/query_active_users_test.exs`
+  - `test/plausible/ingestion/persistent_id/periods_test.exs`
+  - `assets/js/dashboard/stats/graph/fetch-top-stats-active-users.test.tsx`
 
-`.gitignore` now ignores `/backups/`, `/upgrade.vars` and `/.env`.
+## 3. All review findings and fixes
 
-## How it was verified (and what wasn't)
+| Round | Finding | Fix (where) |
+| --- | --- | --- |
+| 1 | Rollback could delete live volumes with an unset `$BACKUP` | Scripts with `upgrade.vars` + `:?` guards; rollback aborts unless all archives exist (`upgrade/rollback.sh`) |
+| 1 | README quick start built `master` without the feature | `PLAUSIBLE_SRC` default/README use the feature branch |
+| 1 | `low-resources.xml` profile ignored in `config.d` | Split into `config.d` + `users.d` files (both repos) |
+| 1 | `pull` fails on the buildable image | `pull --ignore-buildable` |
+| 1 | Rollback diff broken by new traffic; `.env` not backed up | Cutoff used; `.env`/override backed up and restored |
+| 1 | bytemark/smtp amd64-only; `MAILER_EMAIL` forced to example.com | Documented; `MAILER_EMAIL` optional |
+| 1 | Healthcheck timing; `data-check` memory/failure handling | 10s interval, CH retries 60, TCP pg check; `uniq` + checksum; assign-then-use |
+| 1 | Build during downtime; stale README defaults; "never discard" claim | Build in step 1; banner + defaults fixed; claim reworded |
+| 2 | Heredoc blocks consumed by `docker compose exec` stdin; failed archive unnoticed | Real script files; stdin redirected; archives verified |
+| 3 | P1 default build lacked the feature | Feature-branch default |
+| 3 | P1 direct v2.0 → latest jump fails (site imports preload `Site`) | Staged official-release migrations (`upgrade/migrate.sh`) |
+| 3 | P1 rollback must restore `.env`/override, including absence | `backup.sh` / `rollback.sh` |
+| 3 | EE: `device-1`+`23` = `device-12`+`3` = `device-123` | Length-prefixed fields (`persistent_id.ex`) + test |
+| 3 | Fork docs: volume reuse needs `COMPOSE_PROJECT_NAME` | Documented |
+| 3 | Routine backup used an unset `PROJECT`; data-check hid failures | Resolved inline; fixed |
+| 3 | Goals dedup migration made the check fail | Distinct goals |
+| 5 | **Blocker:** dashboard endless re-render | Memoize on `data` refs; render test fails on the old code (71 updates) |
+| 5 | Tiles scanned the whole range with a 30× fan-out | Reported days only |
+| 5 | Warning too broad; no native-start clamp; comparison unchecked | Anchored on reported days; clamped (comparisons inherit the main query's coverage) |
+| 5 | `SINCE` hid later gaps; an empty `SINCE` crashed boot | Ends at first recorded period; `""` = unset |
+| 5 | Placeholder merge; lost graph selection; 400 on hourly | Fixed in `fetch-top-stats.ts` / `visitor-graph.tsx` |
+| 5 | `record_boot` race / partial close; two time dims gave a 500 | `update_all`, unique open index, `on_conflict: :nothing`; validation |
+| 5 | Docs: generic `time` unsupported; "or today" | Documented (schema, READMEs) |
+| 6 | **P1** v2.1.1 runs Postgres before ClickHouse (interleaving arrived in v2.1.2); site imports need `import_id`/`imported_custom_events` | **v2.1.0 stage first** (`migrate.sh`, `deployment.md`) |
+| 6 | Rollback retries overwrote the recovery archives | New `pre-rollback-<ts>/` per attempt |
+| 6 | New users/sites after the upgrade blocked finalize | Postgres counts `inserted_at < cutoff`; `--ignore-data-check` |
+| 6 | Paths with spaces broke `migrate.sh` | Quoted `stage_compose()` |
+| 6 | npm tracker example unusable (`domain` required, `endpoint` defaults to plausible.io) | Separate npm example with `import { init }`, domain, endpoint (fork `deploy/README.md`) |
+| 6 | arm64 note left `depends_on: mail` | Full override documented (both repos) |
+| 6 | Compose minimum too low for `!override` | Docker Compose v2.24.4+ |
 
-**Verified in a sandbox with Docker:**
-- **Mock v2.0 install.** Real `postgres:14-alpine` and
-  `clickhouse-server:23.3.7.5-alpine` volumes, the v2.0 compose file, the
-  v2.0 `events_v2`/`sessions_v2` DDL from `priv/data_migrations/NumericIDs`,
-  200k events, 20k sessions with collapsing pairs, imported rows, and goals
-  with a duplicate.
-- **The full script flow, run as in `deployment.md` §3.**
-  - `git checkout deviceid/<ref> -- upgrade/`, then `backup.sh`
-    (`BACKUP_DIR`), then the switch (stash/checkout/`.env`).
-  - `postgres-16.sh`, then `migrate.sh`, then a second `migrate.sh` (all
-    stages skipped).
-  - The expected migration effects applied by hand: dedupe a goal, convert
-    `sessions_v2` with the exact VersionedSessions SQL, remap `fb`→`Facebook`.
-  - `up -d`, then `verify.sh`, which correctly **failed** after deleting 3
-    events (diff showed site 5's count and checksum).
-  - `rollback.sh`, twice: identical to the baseline; `.env` absence and the
-    override restored; `pre-rollback/` written.
-  - `finalize.sh`: refused when sessions_v2 wasn't converted, refused when
-    the data differed, succeeded otherwise.
-- **ClickHouse hops** 23.3→23.8→24.3→24.8→24.12: counts identical. The
-  VersionedSessions conversion was reproduced on 23.3, 24.3 and 24.12 with
-  identical sums.
-- **Postgres 14 → 16** `pg_restore --exit-on-error`: OK (citext case-insensitive
-  lookup works). Postgres 16 refuses a v14 volume without modifying it.
-- **Split low-resources config on 24.12:** `max_threads=1`,
-  `max_block_size=8192`, `mark_cache_size=524288000`.
-- **Elixir:** `persistent_id.ex` compiled with stubs and
-  `--warnings-as-errors` in CE and EE modes, with no warnings. The collision
-  cases give 3 distinct ids in EE. All changed `.ex`/`.exs` files are
-  `mix format` clean.
-- `docker compose config` is valid for both repos, including the
-  `mail: !reset null` + `depends_on: !override` override.
+## 4. Verification
 
-**NOT verified (please weigh these):**
-- **`mix test` and `mix compile --warnings-as-errors`:** hex.pm is blocked
-  in the sandbox. The new and changed tests
-  (`test/plausible/ingestion/persistent_id_test.exs`,
-  `test/plausible/ingestion/persistent_tracking_test.exs`) have never run.
-- **Real migrations of the official images** (`ghcr.io/plausible/community-edition:v2.1.1 … v3.2.0`)
-  and the real fork image. The sandbox can't download ghcr blobs or build
-  the image, so `migrate.sh`/`verify.sh` ran against **stub images** that
-  answer `db migrate` and the health endpoint. The tags exist (manifests
-  resolved).
-- Whether each official release runs cleanly with the env file and
-  ClickHouse version `migrate.sh` gives it (v2.1.x on CH 24.3, v3.x on 24.12,
-  Postgres 14 or 16).
-- The interactive `finalize.sh` prompt (reads `/dev/tty`); only `--yes` was
-  tested.
+**Done in the sandbox:**
+- **Rolling SQL:** compared with brute-force `uniqExact` windows on
+  ClickHouse 24.12. All 34 days matched exactly, including days without
+  events.
+- **The real `ActiveUsers` Ecto code**, run in a harness with ecto 3.14.2 +
+  ecto_ch 0.11.1 (the `mix.lock` versions) on ClickHouse 24.12:
+  - covers `reported_days`, `rolling_query`, `bucket` and `select_metrics`;
+  - reproduces every value in `query_active_users_test.exs` (day, none,
+    single, week, month, filtered, empty);
+  - also a 6-week `time:week` range and a 2-month `time:month` range.
+- **`Periods`:** compiles with no warnings; coverage cases pass.
+- **Elixir formatting:** clean, with Ecto's `locals_without_parens`.
+- **Frontend:**
+  - `tsc`, eslint, prettier, Jest 35 suites / 527 tests;
+  - the render-loop test fails on the old code and passes now.
+- **Upgrade rehearsals** on a v2.0-shaped dataset (real `postgres:14` +
+  `clickhouse 23.3.7.5` volumes):
+  - ClickHouse hops 23.3 → 24.12 with identical counts;
+  - the `sessions_v2` engine conversion on 23.3, 24.3 and 24.12;
+  - the Postgres 14 → 16 restore.
+- **The full script flow, in a directory whose name contains spaces:**
+  - backup → postgres-16 → migrate (with stub release images, incl. v2.1.0)
+    → rerun → verify;
+  - post-upgrade users, sites and goals don't block `verify`/`finalize`;
+  - two rollbacks, with two `pre-rollback-*` dirs and the first copy
+    unchanged;
+  - `finalize` refuses after deleting pre-upgrade events, and
+    `--ignore-data-check` overrides.
+- `docker compose config` passes for both repos, including the arm64
+  override.
 
-## Please scrutinise in particular
+**Not verified (weigh these):**
+- **`mix test` / `mix compile --warnings-as-errors`** for the fork. hex.pm
+  is blocked in the sandbox, so none of the ExUnit files have run:
+  `persistent_id_test`, `persistent_tracking_test`,
+  `query_active_users_test`, the API test, `periods_test`.
+- **Real official release images** (`ghcr.io/plausible/community-edition:v2.1.0…v3.2.0`)
+  and the real fork image. The image blobs couldn't be downloaded and the
+  fork couldn't be built, so stand-in images replaced them in the
+  rehearsal.
+- The new migrations against a real Postgres via `mix ecto.migrate`.
+- `finalize.sh`'s interactive prompt (only `--yes` was tested).
 
-1. **`migrate.sh` stage choice.** Is v2.1.1 → v2.1.5 → v3.0.1 → v3.1.0 →
-   v3.2.0 → fork safe? Does any stage's data migration load schemas with
-   columns that only a later migration creates? Relevant: `20240528115149`
-   (site imports), `20250410105143` (backfill teams), `20250520073535`
-   (tracker config), `20250807164200` (tracker ids). Can a release's
-   `db migrate` run before reaching its own final migration (e.g. does
-   v2.1.1's `interweave_migrate` stop at its own last migration)? Are the
-   v2.1.x/v3.x env requirements met by the new `plausible-conf.env`?
-2. **`migrate.sh` mechanics:**
-   - `docker compose -f docker-compose.yml [-f override] -f upgrade/stage-image.yml run --rm plausible db migrate`
-     with `STAGE_IMAGE` and `CLICKHOUSE_VERSION` set: could `run` recreate
-     dependency containers with a different ClickHouse image?
-   - The ClickHouse version detection in `clickhouse-start` parsing, and
-     `sort -V` comparisons.
-   - What happens if the user's override sets `depends_on` or the image.
-3. **Scripts under `set -eu`:** paths with spaces, `BACKUP_DIR` relative
-   paths, `find /volume -mindepth 1 -delete` safety, `rm -rf "$BACKUP"` in
-   `finalize.sh`, `docker compose stop` vs `down` (does `down` in
-   `rollback.sh` remove anything besides containers and networks?).
-4. **`data-check.sh` stability.** Do any migrations between v2.0 and the
-   fork legitimately change `users`, `sites`, `shared_links`, `api_keys`
-   counts, per-site `count()`, `uniq(user_id)` or the checksum columns
-   (`user_id, session_id, timestamp, name, pathname`) of pre-cutoff events?
-   That would make `verify.sh`/`finalize.sh` fail falsely. Does `uniq()`
-   return the same value for the same data across ClickHouse 23.3 and 24.12?
-   It was identical in the test, but confirm it isn't version-dependent.
-5. **`persistent_id.ex`.** Encoding correctness, EE `replay_session_id`
-   clauses (nil vs integer), any compile or typing warnings, and test
-   expectations in `persistent_id_test.exs:107`.
-6. Any remaining contradictions between `deployment.md`, `README.md`,
-   `deploy/README.md` and the code.
+## 5. Please scrutinise
 
-## Commands worth running (where tools exist)
+1. **Staged migrations.** Is v2.1.0 → v2.1.1 → v2.1.5 → v3.0.1 → v3.1.0 →
+   v3.2.0 → fork safe? Check for any stage whose Postgres data migrations
+   need ClickHouse migrations or schema columns that aren't there yet.
+   - Relevant: `20240528115149` (site imports), `20250410105143` (backfill
+     teams), `20250520073535` (tracker config), `20250807164200` (tracker
+     ids).
+   - Do v2.1.x/v3.x accept the new `plausible-conf.env`?
+2. **`ActiveUsers` through the real query pipeline:**
+   - `per_day_states_query` via `SQL.QueryBuilder`, `QueryOptimizer` and
+     `QueryRunner`;
+   - comparisons;
+   - `time_labels` / `empty_metrics` for the dashboard graph;
+   - the `has(?, ? + ?)` reported-days filter with `type(^days, {:array,
+     :date})`.
+3. **Warning semantics:** coverage anchored on the reported days, clamped to
+   the native stats start; comparison results inherit the main query's
+   coverage.
+4. **Frontend merge:** `useTopStatsQuery` / `mergeActiveUsersData`, and the
+   `visitor-graph.tsx` fallback and `graphMetric`.
+5. **Scripts:** `set -eu` edge cases, quoting, `find -delete` in-place
+   restores, `data-check.sh`'s `inserted_at < cutoff` on all five tables,
+   `finalize.sh` options.
+6. **Docs vs. code:** `deployment.md`, `README.md`, the fork's
+   `deploy/README.md`, the JSON schema descriptions.
+
+## 6. Commands
 
 ```sh
 # fork (needs hex.pm, Postgres, ClickHouse)
 mix compile --warnings-as-errors
-mix test test/plausible/ingestion/persistent_id_test.exs test/plausible/ingestion/persistent_tracking_test.exs
 mix format --check-formatted
+mix test test/plausible/ingestion/persistent_id_test.exs \
+         test/plausible/ingestion/persistent_tracking_test.exs \
+         test/plausible/ingestion/persistent_id/periods_test.exs \
+         test/plausible/stats/query/query_active_users_test.exs \
+         test/plausible_web/controllers/api/external_stats_controller/query_active_users_test.exs
+npm --prefix assets ci && npm --prefix assets run typecheck && npm --prefix assets test
 
 # community-edition
 for f in upgrade/*.sh; do sh -n "$f"; done
@@ -188,133 +288,13 @@ shellcheck -s sh upgrade/*.sh
 docker compose config -q
 ```
 
-## Round 4 addition: DAU / WAU / MAU (fork `534f84c..66d99ba`)
+## 7. Output wanted
 
-Rolling active user metrics, built on the persistent ids. Diff:
-`git diff 534f84c..66d99ba` in the fork (community-edition: docs only,
-`deployment.md` §2.9 and the config tables).
+Findings, most severe first. Each one needs:
+- severity (P0–P3);
+- `repo:file:line`;
+- what's wrong;
+- evidence (quoted code or a reproduction);
+- a suggested fix.
 
-**Definition.** DAU = unique users on day D; WAU = the 7 days ending on D;
-MAU = the 30 days ending on D. No time dimension gives the value on the last
-day of the range. `time:week`/`time:month` give the value on each bucket's
-last day. Approximate `uniq`.
-
-**Design** (`lib/plausible/stats/sql/active_users.ex`):
-1. **Per-day states:** per-day `uniqState(user_id)` built by the regular
-   `SQL.QueryBuilder` on a derived query:
-   - internal metric `:user_id_state` (`sql/expression.ex`);
-   - dimension `time:day`;
-   - `utc_time_range` widened by 29 days (`DateTimeRange.new!`, so DST is
-     handled);
-   - imports off, `sample_threshold: :no_sampling`, `total_rows` off.
-2. **Rolling windows:** `ARRAY JOIN range(0, 30) AS off`, then
-   `uniqMergeIf(state, off = 0 | off < 7)` / `uniqMerge(state)`, grouped by
-   `day + off`, limited to the trimmed range.
-3. **Bucketing:** per day; week/month via `argMax(value, target_day)`; no
-   dimension via `argMax` over all rows (0 when empty).
-4. **Routing:** `SQL.QueryBuilder.build/2` sends queries whose metrics are
-   all active-user metrics straight to this module. Mixing them with other
-   metrics is rejected, so the rolling query drives the rows and days
-   without events still report WAU/MAU.
-
-**Validation and imports** (`lib/plausible/stats/query_builder.ex`,
-`imported.ex`):
-- Only dau/wau/mau in a query.
-- Dimensions only none / `time:day|week|month`; no realtime.
-- `Imported.schema_supports_query?` returns false, giving the standard
-  `unsupported_query` imports warning.
-
-**Persistent tracking periods:**
-- New table `persistent_tracking_periods` (migration `20261005090000`).
-- `Plausible.Ingestion.PersistentId.Periods`:
-  - `record_boot/1` runs once in `application.ex` (disabled in test config)
-    and opens/closes a period based on `ENABLE_PERSISTENT_TRACKING`;
-  - `coverage/3`;
-  - `PERSISTENT_TRACKING_SINCE` seeds earlier installs.
-- `QueryBuilder.set_active_users_coverage/1` computes per-metric coverage
-  of each window, and `QueryResult.metric_warning/2` adds
-  `persistent_tracking_partial`.
-
-**Dashboard:**
-- Backend passes `data-persistent-tracking` (`stats_controller.ex`,
-  `stats.html.heex`) into `site-context.tsx`.
-- `fetch-top-stats.ts` makes a separate `active-users` request and merges it
-  into the top stats (`mergeActiveUsers`).
-- Tiles are graphable only for day/week/month intervals
-  (`isGraphableMetric`); `visitor-graph.tsx` falls back to visitors.
-- Plus labels, formatters and the `*` warning text.
-
-**Verified here:**
-- The rolling SQL against brute-force `uniqExact` windows on ClickHouse
-  24.12: 34/34 days exact, including days with no events.
-- The **real** `rolling_query/bucket/select_metrics` code, compiled in a
-  harness with ecto 3.14.2 + ecto_ch 0.11.1 (the `mix.lock` versions) and run
-  against ClickHouse. It reproduces every expected value in
-  `query_active_users_test.exs`: day, none, single, week, month, filtered,
-  empty.
-- `Periods` compiled in the same harness, with all coverage cases.
-- Frontend: `tsc`, eslint, prettier, all 35 Jest suites (incl. new
-  `fetch-top-stats-active-users.test.ts`).
-
-**Not verified (please weigh these):**
-- `mix test` / `mix compile --warnings-as-errors` for the whole app,
-  especially:
-  - `per_day_states_query` through the real `SQL.QueryBuilder`: the
-    `Query.set` fields, and the `selected_as(:time)` / `:user_id_state`
-    names as the subquery's columns;
-  - `QueryOptimizer` on these queries;
-  - the comparison path;
-  - `metric_warnings` meta.
-- The new ExUnit files:
-  - `test/plausible/stats/query/query_active_users_test.exs`
-  - `test/plausible_web/controllers/api/external_stats_controller/query_active_users_test.exs`
-  - `test/plausible/ingestion/persistent_id/periods_test.exs`
-- The boot-time recorder in a real release.
-
-**Please scrutinise:**
-- **Week-bucket labels:** do they match the time labels and gap filling the
-  dashboard and API produce? (`weekstart_not_before(target_day,
-  date_range.first)`, with `date_range` trimmed to today.)
-- **Coverage window ends:** is `Enum.min(utc_time_range.last, now)` right for
-  ranges in the future and for comparisons? Comparison queries reuse the main
-  query's coverage map.
-- **EE sampling:** `:no_sampling` is set on the inner query only.
-- **Concurrency:** could `record_boot/1` race when several app nodes boot at
-  once (two open periods)?
-
-## Round 5: fixes for the independent DAU/WAU/MAU review (fork `66d99ba..b26b074`)
-
-`git diff 66d99ba..b26b074` in the fork. All ten findings were confirmed
-against the code and fixed:
-
-| # | Finding | Fix |
-| --- | --- | --- |
-| 1 | **Blocker:** endless re-render on the dashboard (`useQuery` returns a new result object per render) | Memoize on the stable `data` refs (`mergeActiveUsersData`). The render test in `fetch-top-stats-active-users.test.tsx` fails on the old code with "Maximum update depth exceeded" (71 updates) and passes now. |
-| 2 | Whole range scanned with a 30× fan-out even though tiles need one day | `ActiveUsers.reported_days/2`: last day / bucket ends / every day; the states range starts 29 days before the first reported day |
-| 3 | Warning anchored on the range start; no native-stats clamp | `reported_day_bounds/1` anchors the windows; clamped to `site_native_stats_start_at`; tests updated (DAU tile not warned) |
-| 4 | `PERSISTENT_TRACKING_SINCE` hid later gaps | The synthetic period ends at the first recorded period |
-| 5 | An empty `PERSISTENT_TRACKING_SINCE=` crashed the boot | Treated as unset |
-| 6 | Placeholder (previous period) values merged; graph selection lost on reload; 400 on hourly views | Skip placeholder/mismatched merges; keep the stored selection while active users load; `graphMetric` falls back to visitors on hour/minute |
-| 7 | `record_boot` race / partial close | `update_all` closes every open period; new migration `20261005090001` adds a unique partial index (single open period), insert `on_conflict: :nothing` |
-| 8 | Two time dimensions crashed (500) | Rejected in validation (400) |
-| 9, 10 | Docs | No generic `time` dimension; "or today" for ranges past today |
-
-**Verified here:**
-- `reported_days` + `rolling_query` + `bucket` run in the ecto 3.14.2 /
-  ecto_ch 0.11.1 harness on ClickHouse 24.12: all earlier expectations hold.
-  A 6-week `time:week` range gives the Sunday values, and a 2-month
-  `time:month` range checks out.
-- `Periods` compiles without warnings, and the coverage cases pass.
-- Elixir files format clean with Ecto's `locals_without_parens`.
-- `tsc`, eslint, prettier; Jest 35 suites / 527 tests.
-
-**Still not verified:** `mix test` / `mix compile --warnings-as-errors`
-(hex.pm is blocked), including the updated ExUnit tests and the new
-migration.
-
-## Output wanted
-
-Findings ranked most severe first, each with: severity (P0–P3),
-`repo:file:line`, what's wrong, evidence (quoted code or a reproduction),
-and a suggested fix. List explicitly which items above you checked and
-found correct.
+Also list the items above you checked and found correct.
