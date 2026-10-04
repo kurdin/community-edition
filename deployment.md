@@ -202,6 +202,31 @@ If your clients already send the id under another name, set
 `PERSISTENT_TRACKING_DEVICE_ID_PROP` (e.g. `visitor_uid`) instead of changing
 the clients.
 
+### 2.9 Active users (DAU / WAU / MAU)
+
+With `ENABLE_PERSISTENT_TRACKING=true`, the dashboard shows **Daily, Weekly
+and Monthly active users** tiles, and the Stats API accepts the metrics
+`dau`, `wau` and `mau`:
+* DAU: unique visitors on the day.
+* WAU: unique visitors in the 7 days ending on the day.
+* MAU: unique visitors in the 30 days ending on the day.
+
+Tiles show the value on the last day of the selected range. Click a tile to
+graph it per day, week or month. These metrics have no hourly view, and they
+can't be combined with other metrics in one API query.
+
+They're only accurate for days tracked with persistent ids. The app records
+when persistent tracking was switched on. A tile whose window reaches back
+before that shows `*` ("overestimated"). If you enabled persistent tracking
+before upgrading to this version, set the date in `plausible-conf.env`:
+
+```env
+PERSISTENT_TRACKING_SINCE=2026-10-05
+```
+
+Details and API examples: the fork's
+[`deploy/README.md`](https://github.com/kurdin/plausible-analytics-deviceid/blob/claude/determined-cerf-dqrxgj/deploy/README.md#active-users-dau-wau-mau).
+
 ---
 
 ## 3. Upgrading an existing Docker install without data loss
@@ -635,6 +660,7 @@ Fork-specific variables (in `plausible-conf.env`):
 | `ENABLE_PERSISTENT_TRACKING` | `false` | `true` uses stable visitor ids. `false` gives upstream behaviour (daily rotating salt). |
 | `PERSISTENT_SALT_SECRET` | — | Required when enabled, at least 16 bytes. Keys the visitor id hashes. Keep it stable and secret. |
 | `PERSISTENT_TRACKING_DEVICE_ID_PROP` | `deviceId` | Custom property name to read the device id from. |
+| `PERSISTENT_TRACKING_SINCE` | — | `YYYY-MM-DD` date persistent tracking was first enabled, if before this version (it is recorded automatically from then on). Only used for the active users warnings. |
 
 Compose variables (in `.env`, next to `docker-compose.yml`):
 

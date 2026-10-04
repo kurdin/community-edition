@@ -188,6 +188,100 @@ shellcheck -s sh upgrade/*.sh
 docker compose config -q
 ```
 
+## Round 4 addition: DAU / WAU / MAU (fork `534f84c..66d99ba`)
+
+Rolling active user metrics, built on the persistent ids. Diff:
+`git diff 534f84c..66d99ba` in the fork (community-edition: docs only,
+`deployment.md` §2.9 and the config tables).
+
+**Definition.** DAU = unique users on day D; WAU = the 7 days ending on D;
+MAU = the 30 days ending on D. No time dimension gives the value on the last
+day of the range. `time:week`/`time:month` give the value on each bucket's
+last day. Approximate `uniq`.
+
+**Design** (`lib/plausible/stats/sql/active_users.ex`):
+1. **Per-day states:** per-day `uniqState(user_id)` built by the regular
+   `SQL.QueryBuilder` on a derived query:
+   - internal metric `:user_id_state` (`sql/expression.ex`);
+   - dimension `time:day`;
+   - `utc_time_range` widened by 29 days (`DateTimeRange.new!`, so DST is
+     handled);
+   - imports off, `sample_threshold: :no_sampling`, `total_rows` off.
+2. **Rolling windows:** `ARRAY JOIN range(0, 30) AS off`, then
+   `uniqMergeIf(state, off = 0 | off < 7)` / `uniqMerge(state)`, grouped by
+   `day + off`, limited to the trimmed range.
+3. **Bucketing:** per day; week/month via `argMax(value, target_day)`; no
+   dimension via `argMax` over all rows (0 when empty).
+4. **Routing:** `SQL.QueryBuilder.build/2` sends queries whose metrics are
+   all active-user metrics straight to this module. Mixing them with other
+   metrics is rejected, so the rolling query drives the rows and days
+   without events still report WAU/MAU.
+
+**Validation and imports** (`lib/plausible/stats/query_builder.ex`,
+`imported.ex`):
+- Only dau/wau/mau in a query.
+- Dimensions only none / `time:day|week|month`; no realtime.
+- `Imported.schema_supports_query?` returns false, giving the standard
+  `unsupported_query` imports warning.
+
+**Persistent tracking periods:**
+- New table `persistent_tracking_periods` (migration `20261005090000`).
+- `Plausible.Ingestion.PersistentId.Periods`:
+  - `record_boot/1` runs once in `application.ex` (disabled in test config)
+    and opens/closes a period based on `ENABLE_PERSISTENT_TRACKING`;
+  - `coverage/3`;
+  - `PERSISTENT_TRACKING_SINCE` seeds earlier installs.
+- `QueryBuilder.set_active_users_coverage/1` computes per-metric coverage
+  of each window, and `QueryResult.metric_warning/2` adds
+  `persistent_tracking_partial`.
+
+**Dashboard:**
+- Backend passes `data-persistent-tracking` (`stats_controller.ex`,
+  `stats.html.heex`) into `site-context.tsx`.
+- `fetch-top-stats.ts` makes a separate `active-users` request and merges it
+  into the top stats (`mergeActiveUsers`).
+- Tiles are graphable only for day/week/month intervals
+  (`isGraphableMetric`); `visitor-graph.tsx` falls back to visitors.
+- Plus labels, formatters and the `*` warning text.
+
+**Verified here:**
+- The rolling SQL against brute-force `uniqExact` windows on ClickHouse
+  24.12: 34/34 days exact, including days with no events.
+- The **real** `rolling_query/bucket/select_metrics` code, compiled in a
+  harness with ecto 3.14.2 + ecto_ch 0.11.1 (the `mix.lock` versions) and run
+  against ClickHouse. It reproduces every expected value in
+  `query_active_users_test.exs`: day, none, single, week, month, filtered,
+  empty.
+- `Periods` compiled in the same harness, with all coverage cases.
+- Frontend: `tsc`, eslint, prettier, all 35 Jest suites (incl. new
+  `fetch-top-stats-active-users.test.ts`).
+
+**Not verified (please weigh these):**
+- `mix test` / `mix compile --warnings-as-errors` for the whole app,
+  especially:
+  - `per_day_states_query` through the real `SQL.QueryBuilder`: the
+    `Query.set` fields, and the `selected_as(:time)` / `:user_id_state`
+    names as the subquery's columns;
+  - `QueryOptimizer` on these queries;
+  - the comparison path;
+  - `metric_warnings` meta.
+- The new ExUnit files:
+  - `test/plausible/stats/query/query_active_users_test.exs`
+  - `test/plausible_web/controllers/api/external_stats_controller/query_active_users_test.exs`
+  - `test/plausible/ingestion/persistent_id/periods_test.exs`
+- The boot-time recorder in a real release.
+
+**Please scrutinise:**
+- **Week-bucket labels:** do they match the time labels and gap filling the
+  dashboard and API produce? (`weekstart_not_before(target_day,
+  date_range.first)`, with `date_range` trimmed to today.)
+- **Coverage window ends:** is `Enum.min(utc_time_range.last, now)` right for
+  ranges in the future and for comparisons? Comparison queries reuse the main
+  query's coverage map.
+- **EE sampling:** `:no_sampling` is set on the inner query only.
+- **Concurrency:** could `record_boot/1` race when several app nodes boot at
+  once (two open periods)?
+
 ## Output wanted
 
 Findings ranked most severe first, each with: severity (P0–P3),
