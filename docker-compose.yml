@@ -5,7 +5,8 @@ services:
 
   plausible_db:
     # Existing v2.0 installs created their volume with postgres:14. Keep
-    # POSTGRES_VERSION=14 or follow upgrade/postgres.md before bumping it.
+    # POSTGRES_VERSION=14 (in .env) or follow deployment.md section 3.5
+    # (dump/restore) before using 16.
     image: postgres:${POSTGRES_VERSION:-16}-alpine
     restart: always
     volumes:
@@ -13,7 +14,11 @@ services:
     environment:
       - POSTGRES_PASSWORD=postgres
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      # TCP check, so it isn't "ready" during first-time initdb (socket only)
+      test: ["CMD-SHELL", "pg_isready -U postgres -h 127.0.0.1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
       start_period: 1m
 
   plausible_events_db:
@@ -25,8 +30,9 @@ services:
       - ./clickhouse/clickhouse-config.xml:/etc/clickhouse-server/config.d/logging.xml:ro
       - ./clickhouse/clickhouse-user-config.xml:/etc/clickhouse-server/users.d/logging.xml:ro
       - ./clickhouse/ipv4-only.xml:/etc/clickhouse-server/config.d/ipv4-only.xml:ro
-      # Uncomment on small servers (< 4GB RAM):
+      # Uncomment both lines on small servers (< 4GB RAM):
       # - ./clickhouse/low-resources.xml:/etc/clickhouse-server/config.d/low-resources.xml:ro
+      # - ./clickhouse/default-profile-low-resources-overrides.xml:/etc/clickhouse-server/users.d/default-profile-low-resources-overrides.xml:ro
     ulimits:
       nofile:
         soft: 262144
@@ -35,12 +41,18 @@ services:
       - CLICKHOUSE_SKIP_USER_SETUP=1
     healthcheck:
       test: ["CMD-SHELL", "wget --no-verbose --tries=1 -O - http://127.0.0.1:8123/ping || exit 1"]
+      interval: 10s
+      timeout: 5s
+      # generous: after a version upgrade ClickHouse may need minutes to load parts
+      retries: 60
       start_period: 1m
 
   plausible:
     # Built from the persistent-tracking fork instead of the pre-built image.
-    # PLAUSIBLE_SRC can be a git URL (optionally with #branch) or a local
-    # checkout, e.g. PLAUSIBLE_SRC=../plausible-analytics-deviceId
+    # Set PLAUSIBLE_SRC in .env to a git URL with #branch/#tag, or to a local
+    # checkout (e.g. PLAUSIBLE_SRC=../plausible-analytics-deviceId).
+    # NOTE: the #master default only contains the persistent tracking feature
+    # once the fork's feature branch has been merged into master.
     build:
       context: ${PLAUSIBLE_SRC:-https://github.com/kurdin/plausible-analytics-deviceid.git#master}
       args:

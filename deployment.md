@@ -41,10 +41,14 @@ Volumes (names are unchanged from the original community-edition setup):
 **Schema migrations are automatic.** Each time the `plausible` container
 starts, it runs `db createdb` and `db migrate`. `db migrate` applies all
 pending Postgres *and* ClickHouse migrations together, in chronological order,
-so you can jump straight from v2.0 to the latest version. Migrations only add
-or convert data, they never discard it. The one table conversion
-(ClickHouse `sessions_v2` → `VersionedCollapsingMergeTree`) leaves the old
-table behind as a backup.
+so you can jump straight from v2.0 to the latest version. Migrations add
+columns and tables and convert data in place. Your stats, users, sites,
+goals, shared links and API keys are kept. The few things removed are
+features upstream retired: for example, the unused `custom_domains` table is
+dropped, empty site-import records are cleaned up, and source names are
+normalised (`fb` → `Facebook`). The one table conversion (ClickHouse
+`sessions_v2` → `VersionedCollapsingMergeTree`) leaves the old table behind
+as a backup.
 
 **Persistent tracking is opt-in.** With `ENABLE_PERSISTENT_TRACKING=false`
 the app behaves exactly like upstream Plausible. Turning it on changes only
@@ -59,9 +63,23 @@ how *new* events are identified. Historical data is never rewritten.
 * Linux server, x86_64 or arm64 with SSE 4.2 / NEON, **4 GB RAM minimum**.
   Building the image needs about 4 GB of free memory; build elsewhere (see 5.2)
   if the server is smaller.
+  The bundled `mail` relay (`bytemark/smtp`) is **amd64-only**. On arm64,
+  point the `SMTP_*` variables in `plausible-conf.env` at a real SMTP server
+  and remove the relay with this `docker-compose.override.yml`:
+  ```yaml
+  services:
+    mail: !reset null
+    plausible:
+      depends_on: !override
+        plausible_db:
+          condition: service_healthy
+        plausible_events_db:
+          condition: service_healthy
+  ```
 * Docker Engine 24+ with the Compose v2 plugin (`docker compose version`).
-* Outbound internet access during the build (GitHub, hex.pm, npm, Alpine
-  mirrors).
+* Outbound internet access during the build: github.com, hex.pm
+  (repo.hex.pm, builds.hex.pm), registry.npmjs.org, dl-cdn.alpinelinux.org
+  and download.db-ip.com (free geolocation database).
 * A DNS record pointing your domain to the server.
 
 ### 2.2 Get the files
@@ -83,8 +101,11 @@ Edit `plausible-conf.env`:
 sed -i "s|^BASE_URL=.*|BASE_URL=https://plausible.example.com|" plausible-conf.env
 sed -i "s|^SECRET_KEY_BASE=.*|SECRET_KEY_BASE=$(openssl rand -base64 48 | tr -d '\n')|" plausible-conf.env
 sed -i "s|^PERSISTENT_SALT_SECRET=.*|PERSISTENT_SALT_SECRET=$(openssl rand -base64 48 | tr -d '\n')|" plausible-conf.env
-sed -i "s|^MAILER_EMAIL=.*|MAILER_EMAIL=plausible@example.com|" plausible-conf.env
 ```
+
+Mail is sent from `plausible@<BASE_URL host>` by default. To use another
+sender, set `MAILER_EMAIL` to an address on a domain you control; SPF/DMARC
+reject mail from domains you don't.
 
 Back up the generated secrets somewhere safe (a password manager):
 
@@ -138,6 +159,10 @@ Pass the id as a custom property on **every** event, pageviews included. An
 event without it falls back to an IP + user-agent id, which is different from
 the device id.
 
+Plausible's site snippet already calls `plausible.init()`. Edit that call to
+add `customProperties`, rather than adding a second `init()`. A second call
+is ignored once the script is initialised.
+
 ```html
 <script>
   function getOrCreateDeviceId() {
@@ -153,9 +178,12 @@ the device id.
     }
   }
 </script>
-<!-- In the snippet Plausible gives you, add customProperties to init(): -->
+<!-- the existing init() call in your Plausible snippet, with customProperties added -->
 <script>
-  plausible.init({ customProperties: { deviceId: getOrCreateDeviceId() } })
+  plausible.init({
+    // ...options already in your snippet...
+    customProperties: { deviceId: getOrCreateDeviceId() }
+  })
 </script>
 ```
 
@@ -194,57 +222,79 @@ installs follow the same steps.
 ### How "no data loss" is guaranteed
 
 1. **Full backups before anything changes:** a logical Postgres dump, plus
-   cold archives of every volume.
+   cold archives of every volume and of your config files.
 2. **A baseline of row counts.** [`upgrade/data-check.sh`](./upgrade/data-check.sh)
-   counts users, sites, goals, events, sessions, per-site visitors and imported
-   rows. It runs again after the upgrade, and the two outputs must be identical.
+   records counts of users, sites, goals, shared links, API keys, events and
+   sessions; per-site event counts, visitors and a checksum of the events;
+   and imported rows. It runs again after the upgrade, and the two outputs
+   must be identical.
 3. **Each step is verified before the next one.** Every step can be undone
    by restoring the archives (section 4).
 
-This exact procedure was rehearsed on a v2.0-shaped dataset: ClickHouse
-23.3.7.5 → 23.8 → 24.3 → 24.8 → 24.12, the `sessions_v2` engine conversion,
-Postgres 14 → 16 dump/restore, and a full rollback. `data-check.sh` produced
-identical output before the upgrade, after it, and after the rollback. The application
-migrations in step 3.6 are upstream Plausible's own, unchanged by this fork.
-They are the same ones every CE install runs when upgrading from v2.0.
+This procedure was rehearsed on a v2.0-shaped dataset: ClickHouse 23.3.7.5 →
+23.8 → 24.3 → 24.8 → 24.12, the `sessions_v2` engine conversion, Postgres
+14 → 16 dump/restore, and a full rollback. `data-check.sh` produced
+identical output before the upgrade, after it, and after the rollback. The
+application migrations in step 3.6 are upstream Plausible's own, unchanged
+by this fork. They are the same ones every CE install runs when upgrading
+from v2.0.
 
-### 3.0 Before you start
+### Overview and downtime
 
-Plan a maintenance window. Tracking stops while the app is down: visitors are
-not queued, so events sent during the window are lost (stored data is not
-affected). Expect 15–60 minutes depending on data size, plus the image build.
+| Step | App online? |
+| --- | --- |
+| 3.1 Prepare: checks, config backup, new files, **build the image** | yes |
+| 3.2 Stop the app, record the baseline | **downtime starts** |
+| 3.3 Back up the data | down |
+| 3.4 Upgrade ClickHouse | down |
+| 3.5 Upgrade or keep Postgres | down |
+| 3.6 Run the migrations | down |
+| 3.7 Start and verify | **back online** |
+| 3.8 Enable persistent tracking, 3.9 clean up | online |
 
-Run everything from **the directory of your existing install** (where your
-current `docker-compose.yml` is):
+Events sent while the app is down are not queued, so they're lost (stored
+data is not affected). Expect 15–60 minutes of downtime, depending on data
+size.
+
+> **Shell state.** Every step needs `PROJECT` and `BACKUP`. Step 3.1 saves
+> them to `upgrade.vars`, and each later step starts with
+> `. ./upgrade.vars && : "${PROJECT:?}" "${BACKUP:?}"`. That line reloads them
+> and stops with an error if they're missing. Always run the steps from your
+> install directory, even in a new terminal.
+
+### 3.1 Prepare (old instance still running)
+
+**a) Variables and backup location.** Run this in the directory of your
+existing install (where your current `docker-compose.yml` is):
 
 ```sh
 cd /path/to/your/plausible        # e.g. ~/hosting
-docker compose ps                 # should list plausible, plausible_db, plausible_events_db, mail
-```
+docker compose ps                 # plausible, plausible_db, plausible_events_db, mail
 
-Find the Compose project name and volume names:
-
-```sh
+DEPLOY_REF=claude/determined-cerf-dqrxgj
+APP_REF=claude/determined-cerf-dqrxgj
 PROJECT=$(docker inspect --format '{{ index .Config.Labels "com.docker.compose.project" }}' \
-  $(docker compose ps -aq plausible_db))
-echo "$PROJECT"
+  "$(docker compose ps -aq plausible_db)")
+BACKUP="$HOME/plausible-backup-$(date -u +%Y%m%dT%H%M%SZ)"
+mkdir -p "$BACKUP/config"
+printf "PROJECT='%s'\nBACKUP='%s'\nDEPLOY_REF='%s'\nAPP_REF='%s'\n" \
+  "$PROJECT" "$BACKUP" "$DEPLOY_REF" "$APP_REF" > upgrade.vars
+cat upgrade.vars
 docker volume ls --filter label=com.docker.compose.project="$PROJECT"
 # expect: ${PROJECT}_db-data  ${PROJECT}_event-data  ${PROJECT}_event-logs
 ```
 
-Check disk space. You need free space of at least **2× the size of
+**b) Disk space.** You need free space of at least **2× the size of
 `event-data` plus `db-data`**: one copy for the backup archives, and
 headroom for ClickHouse mutations that rewrite data parts during migration.
 
 ```sh
-for v in db-data event-data; do
-  docker run --rm -v "${PROJECT}_${v}:/v:ro" alpine du -sh /v
-done
-df -h .
+for v in db-data event-data; do docker run --rm -v "${PROJECT}_${v}:/v:ro" alpine du -sh /v; done
+df -h "$BACKUP"
 ```
 
-Check that your data is in the v2 tables. An install that started on v1.x and
-skipped the v2.0 data migration would still have it in the legacy
+**c) Check that your data is in the v2 tables.** An install that started on
+v1.x and skipped the v2.0 data migration would still have it in the legacy
 `events`/`sessions` tables:
 
 ```sh
@@ -253,62 +303,24 @@ docker compose exec plausible_events_db clickhouse-client -d plausible_events_db
 ```
 
 If `events` has rows but `events_v2` is empty or much smaller, **stop here**.
-Run the v2.0 NumericIDs data migration on the old image first; see the
+Finish the v2.0 "NumericIDs" data migration on the old image first; see the
 upstream v2.0.0 release notes.
 
-### 3.1 Stop the app and record the baseline
+**d) Back up the config files.**
 
 ```sh
-docker compose stop plausible
-date -u '+%Y-%m-%d %H:%M:%S' > upgrade-cutoff.txt     # used by the after-check
-
-# data-check.sh ships with the new files; fetch it now to take the baseline
-curl -fsSLo data-check.sh \
-  "https://raw.githubusercontent.com/kurdin/community-edition/$DEPLOY_REF/upgrade/data-check.sh"
-chmod +x data-check.sh
-./data-check.sh > upgrade-before.txt
-cat upgrade-before.txt
-```
-
-### 3.2 Back up everything
-
-```sh
-BACKUP="$HOME/plausible-backup-$(date -u +%Y%m%dT%H%M%SZ)"
-mkdir -p "$BACKUP"
-
-# 1. config files
-cp docker-compose.yml plausible-conf.env "$BACKUP"/
-cp docker-compose.override.yml "$BACKUP"/ 2>/dev/null || true
-cp -r clickhouse "$BACKUP"/
-
-# 2. logical Postgres dump (custom format, used for the 14 -> 16 upgrade)
-docker compose exec -T plausible_db pg_dump -U postgres -Fc plausible_db > "$BACKUP/plausible_db.dump"
-
-# 3. cold archives of every volume (databases must be stopped)
-docker compose stop
-for v in db-data event-data event-logs; do
-  docker run --rm -v "${PROJECT}_${v}:/volume:ro" -v "$BACKUP:/backup" alpine \
-    tar -C /volume -czf "/backup/${v}.tar.gz" .
+for f in docker-compose.yml docker-compose.override.yml plausible-conf.env .env; do
+  [ -f "$f" ] && cp "$f" "$BACKUP/config/"
 done
-
-# 4. verify the backup
-ls -lh "$BACKUP"
-docker compose start plausible_db
-docker compose exec -T plausible_db pg_restore --list < "$BACKUP/plausible_db.dump" | head
-for v in db-data event-data event-logs; do tar -tzf "$BACKUP/${v}.tar.gz" > /dev/null && echo "$v OK"; done
-docker compose stop plausible_db
+cp -r clickhouse "$BACKUP/config/"
+ls -la "$BACKUP/config"
 ```
 
-Keep `$BACKUP` until you have run the new version for a while. Ideally also
-copy it off the server.
-
-### 3.3 Update the deployment files
-
-Your directory is a git clone of `plausible/community-edition`. Switch it to
-the fork without losing your local edits:
+**e) Switch to the new deployment files.** This doesn't affect the running
+containers.
 
 ```sh
-git stash                                  # your edited plausible-conf.env / compose (also in $BACKUP)
+git stash                                 # your local edits (also saved in $BACKUP/config)
 git remote add deviceid https://github.com/kurdin/community-edition.git
 git fetch deviceid
 git checkout -b persistent-tracking "deviceid/$DEPLOY_REF"
@@ -317,19 +329,19 @@ echo "PLAUSIBLE_SRC=https://github.com/kurdin/plausible-analytics-deviceid.git#$
 
 > If your directory isn't a git clone, copy `docker-compose.yml`,
 > `plausible-conf.env`, `clickhouse/` and `upgrade/` from the fork into it.
-> Don't move the install to another directory, or the project name and
-> volume names will change.
+> Don't move the install to another directory: the project name, and with
+> it the volume names, would change.
 
-Merge your old settings into the new `plausible-conf.env`:
+**f) Merge your old settings into the new `plausible-conf.env`.**
 
 ```sh
-diff "$BACKUP/plausible-conf.env" plausible-conf.env
+diff "$BACKUP/config/plausible-conf.env" plausible-conf.env
 ```
 
 * Copy **`BASE_URL` and `SECRET_KEY_BASE` exactly** from the old file. Don't
   generate a new `SECRET_KEY_BASE`.
 * Copy any other variables you had set (Google integration, `MAXMIND_*`,
-  `DISABLE_REGISTRATION`, SMTP credentials, …).
+  `DISABLE_REGISTRATION`, `MAILER_EMAIL`, SMTP credentials, …).
 * If you had `MAILER_ADAPTER=Bamboo.SMTPAdapter`, change it to
   `Bamboo.Mua`. The old adapter was removed and the app refuses to start with
   it.
@@ -343,15 +355,64 @@ diff "$BACKUP/plausible-conf.env" plausible-conf.env
 If you had a `docker-compose.override.yml`, check it doesn't pin the old
 `image: plausible/analytics:v2.0` or old database images.
 
+**g) Build the new image now, while the old app still serves traffic.** It
+takes 10–20 minutes and needs about 4 GB of free RAM. On a small server,
+build elsewhere (5.2).
+
+```sh
+docker compose build plausible
+```
+
+> Until step 3.4, don't run `docker compose up`. It would recreate
+> containers from the new files. `stop`, `start` and `exec` are safe.
+
+### 3.2 Stop the app and record the baseline (downtime starts)
+
+```sh
+. ./upgrade.vars && : "${PROJECT:?}" "${BACKUP:?}"
+docker compose stop plausible
+date -u '+%Y-%m-%d %H:%M:%S' > "$BACKUP/cutoff.txt"
+cp upgrade/data-check.sh "$BACKUP/"
+"$BACKUP/data-check.sh" > "$BACKUP/before.txt"
+cat "$BACKUP/before.txt"
+```
+
+### 3.3 Back up the data
+
+```sh
+. ./upgrade.vars && : "${PROJECT:?}" "${BACKUP:?}"
+
+# logical Postgres dump (custom format, also used for the 14 -> 16 upgrade)
+docker compose exec -T plausible_db pg_dump -U postgres -Fc plausible_db > "$BACKUP/plausible_db.dump"
+
+# cold archives of every volume (databases stopped)
+docker compose stop
+for v in db-data event-data event-logs; do
+  docker run --rm -v "${PROJECT}_${v}:/volume:ro" -v "$BACKUP:/backup" alpine \
+    tar -C /volume -czf "/backup/${v}.tar.gz" .
+done
+
+# verify
+ls -lh "$BACKUP"
+for v in db-data event-data event-logs; do tar -tzf "$BACKUP/${v}.tar.gz" > /dev/null && echo "$v archive OK"; done
+docker compose start plausible_db
+docker compose exec -T plausible_db pg_restore --list < "$BACKUP/plausible_db.dump" | head -5
+docker compose stop plausible_db
+```
+
+Keep `$BACKUP` until you've run the new version for a while, and ideally
+copy it off the server too.
+
 ### 3.4 Upgrade ClickHouse in place (23.3 → 24.12)
 
 ClickHouse upgrades its data files in place on first start. Go through the LTS
 releases one at a time, checking the counts after each:
 
 ```sh
+. ./upgrade.vars && : "${PROJECT:?}" "${BACKUP:?}"
 for v in 23.8 24.3 24.8 24.12; do
   echo "== ClickHouse $v"
-  CLICKHOUSE_VERSION=$v docker compose up -d --wait plausible_events_db || break
+  CLICKHOUSE_VERSION=$v docker compose up -d --wait plausible_events_db || { echo "ClickHouse $v did not become healthy"; break; }
   docker compose exec -T plausible_events_db clickhouse-client -q \
     "SELECT version(), (SELECT count() FROM plausible_events_db.events_v2), (SELECT sum(sign) FROM plausible_events_db.sessions_v2)"
 done
@@ -359,16 +420,23 @@ docker compose logs plausible_events_db | grep -iE '<Error>|Exception' | tail
 ```
 
 Every line should show the same event and session counts as
-`upgrade-before.txt`. If a hop fails to start, don't continue; see section 4.
+`$BACKUP/before.txt`.
+
+`--wait` allows ClickHouse up to about 11 minutes to load its data after
+each version change. If a hop still fails, check `docker compose logs
+plausible_events_db`. A big dataset may simply need more time: rerun the
+same version. Otherwise roll back (section 4).
 
 After the last hop, `docker compose up` uses 24.12 by default (no variable
 needed).
 
 ### 3.5 Upgrade PostgreSQL (14 → 16) or stay on 14
 
-**Option A: stay on Postgres 14 (simplest).** It is fully supported:
+**Option A: stay on Postgres 14 (simplest).** The current code needs nothing
+newer than Postgres 13:
 
 ```sh
+. ./upgrade.vars && : "${PROJECT:?}" "${BACKUP:?}"
 echo 'POSTGRES_VERSION=14' >> .env
 docker compose up -d --wait plausible_db
 ```
@@ -377,29 +445,41 @@ docker compose up -d --wait plausible_db
 restore. Postgres 16 refuses to start on a v14 data directory ("database files
 are incompatible with server") without changing it, so a mistake here is safe.
 
+Run it as one block. It stops at the first error and does nothing unless the
+dump exists:
+
 ```sh
+sh -eu <<'PG16'
+. ./upgrade.vars
+: "${PROJECT:?}" "${BACKUP:?}"
+[ -s "$BACKUP/plausible_db.dump" ] || { echo "missing $BACKUP/plausible_db.dump, aborting"; exit 1; }
+
 docker compose rm -sf plausible_db
 
 # keep the v14 data directory as an extra safety copy
 docker volume create "${PROJECT}_db-data-pg14"
 docker run --rm -v "${PROJECT}_db-data:/from:ro" -v "${PROJECT}_db-data-pg14:/to" alpine cp -a /from/. /to/
 
-# start Postgres 16 on a fresh db-data volume and restore the dump
-docker volume rm "${PROJECT}_db-data"
+# empty db-data in place (keeps the volume and its Compose labels), start 16, restore
+docker run --rm -v "${PROJECT}_db-data:/volume" alpine find /volume -mindepth 1 -delete
 docker compose up -d --wait plausible_db
 docker compose exec -T plausible_db createdb -U postgres plausible_db
 docker compose exec -T plausible_db pg_restore -U postgres -d plausible_db --exit-on-error < "$BACKUP/plausible_db.dump"
-docker compose exec -T plausible_db psql -U postgres -d plausible_db -c "SELECT count(*) FROM users"
+echo "POSTGRES 16 RESTORE OK"
+PG16
 ```
 
-Before continuing, confirm the counts with
-`./data-check.sh | head -8` (the Postgres part should match
-`upgrade-before.txt`).
-
-### 3.6 Build the new app and run the migrations
+With either option, the Postgres part of the check must match the baseline:
 
 ```sh
-docker compose build plausible
+"$BACKUP/data-check.sh" | head -7
+head -7 "$BACKUP/before.txt"
+```
+
+### 3.6 Run the migrations
+
+```sh
+. ./upgrade.vars && : "${PROJECT:?}" "${BACKUP:?}"
 
 # preview what will run (Postgres and ClickHouse, interleaved by date)
 docker compose run --rm plausible db pending-migrations
@@ -412,22 +492,23 @@ Notes:
 
 * On large datasets some ClickHouse migrations rewrite data with mutations
   (normalising source names, adding columns). They can take a while.
-  **Don't interrupt them.** If the command is killed anyway, rerunning
-  `db migrate` resumes from the first unfinished migration.
-* Expected log lines include `Exchanging sessions_v2 …` or `Migration done!`
-  (sessions engine conversion), `Finished backfilling sites` (site imports)
-  and the teams backfill. Errors stop the command with a non-zero exit code.
+  **Don't interrupt them.** If the command is killed anyway, rerun
+  `db migrate`: finished migrations are recorded and skipped.
+* Expected log lines include `Migration done!` (sessions engine conversion),
+  `Finished backfilling sites` (site imports) and the teams backfill. Any
+  error stops the command with a non-zero exit code.
 * The command must end without errors before you continue.
 
-### 3.7 Start and verify
+### 3.7 Start and verify (back online)
 
 ```sh
+. ./upgrade.vars && : "${PROJECT:?}" "${BACKUP:?}"
 docker compose up -d
-docker compose logs -f plausible           # wait for the endpoint to be running
+docker compose logs -f plausible           # wait for the endpoint to be running, then Ctrl-C
 curl -fsS http://127.0.0.1:8000/api/system/health/ready && echo ready
 
-./upgrade/data-check.sh "$(cat upgrade-cutoff.txt)" > upgrade-after.txt
-diff upgrade-before.txt upgrade-after.txt && echo "DATA IDENTICAL"
+./upgrade/data-check.sh "$(cat "$BACKUP/cutoff.txt")" > "$BACKUP/after.txt"
+diff "$BACKUP/before.txt" "$BACKUP/after.txt" && echo "DATA IDENTICAL"
 ```
 
 `diff` must print nothing. The cutoff argument makes sure traffic that
@@ -458,6 +539,8 @@ ranges. Sessions in progress at the moment of the switch are split once.
 ### 3.9 Clean up (after a week or so)
 
 ```sh
+. ./upgrade.vars && : "${PROJECT:?}" "${BACKUP:?}"
+
 # old sessions_v2 table left by the engine conversion (one of these exists)
 docker compose exec plausible_events_db clickhouse-client -d plausible_events_db -q \
   "SELECT name, engine FROM system.tables WHERE name LIKE 'sessions_v2_%'"
@@ -477,23 +560,66 @@ Keep the `$BACKUP` archives as long as your retention policy requires.
 
 ## 4. Rollback
 
-You can return to the exact pre-upgrade state at any point:
+Restoring the archives returns the install to its exact state at step 3.3.
+
+> [!WARNING]
+> A rollback **discards everything written after the upgrade started**: new
+> events, and any sites, users or goals created since. The block below
+> archives the current state into `$BACKUP/pre-rollback/` first, so nothing
+> is destroyed. Copy that data over by hand later if you need it.
+
+Run the whole block from your install directory. It runs in its own `sh`,
+stops at the first error, and refuses to touch any volume unless all three
+archives are present:
 
 ```sh
-docker compose down                                     # stops containers, keeps volumes
+sh -eu <<'ROLLBACK'
+. ./upgrade.vars
+: "${PROJECT:?}" "${BACKUP:?}"
 for v in db-data event-data event-logs; do
-  docker volume rm "${PROJECT}_${v}"
-  docker volume create "${PROJECT}_${v}"
+  [ -s "$BACKUP/$v.tar.gz" ] || { echo "missing $BACKUP/$v.tar.gz, aborting"; exit 1; }
+done
+[ -d "$BACKUP/config" ] || { echo "missing $BACKUP/config, aborting"; exit 1; }
+
+# 1. safety copy of the current (post-upgrade) state
+mkdir -p "$BACKUP/pre-rollback"
+docker compose stop
+for v in db-data event-data event-logs; do
+  docker run --rm -v "${PROJECT}_${v}:/volume:ro" -v "$BACKUP/pre-rollback:/backup" alpine \
+    tar -C /volume -czf "/backup/${v}.tar.gz" .
+done
+cp docker-compose.yml plausible-conf.env "$BACKUP/pre-rollback/"
+[ -f .env ] && cp .env "$BACKUP/pre-rollback/"
+
+# 2. restore the volumes in place (keeps the volumes and their Compose labels)
+docker compose down
+for v in db-data event-data event-logs; do
   docker run --rm -v "${PROJECT}_${v}:/volume" -v "$BACKUP:/backup:ro" alpine \
-    tar -C /volume -xzf "/backup/${v}.tar.gz"
+    sh -c 'find /volume -mindepth 1 -delete && tar -C /volume -xzf "/backup/$0.tar.gz"' "$v"
 done
 
-cp "$BACKUP/docker-compose.yml" "$BACKUP/plausible-conf.env" .
-cp -r "$BACKUP/clickhouse" .
-rm -f .env                                              # drop PLAUSIBLE_SRC / POSTGRES_VERSION overrides
-docker compose up -d                                    # old images: plausible v2.0, Postgres 14, ClickHouse 23.3
-./data-check.sh > rollback.txt; diff upgrade-before.txt rollback.txt && echo "ROLLBACK OK"
+# 3. restore the config files exactly as they were
+rm -f .env docker-compose.override.yml
+cp "$BACKUP/config/docker-compose.yml" "$BACKUP/config/plausible-conf.env" .
+for f in docker-compose.override.yml .env; do
+  [ -f "$BACKUP/config/$f" ] && cp "$BACKUP/config/$f" .
+done
+rm -rf clickhouse && cp -r "$BACKUP/config/clickhouse" .
+
+# 4. start only the databases (old images) and verify
+docker compose up -d plausible_db plausible_events_db
+until docker compose exec -T plausible_events_db clickhouse-client -q 'SELECT 1' >/dev/null 2>&1 \
+   && docker compose exec -T plausible_db pg_isready -U postgres -h 127.0.0.1 >/dev/null 2>&1; do sleep 2; done
+"$BACKUP/data-check.sh" "$(cat "$BACKUP/cutoff.txt")" > "$BACKUP/rollback.txt"
+diff "$BACKUP/before.txt" "$BACKUP/rollback.txt"
+echo "ROLLBACK DATA OK, start the app with: docker compose up -d"
+ROLLBACK
 ```
+
+If it prints `ROLLBACK DATA OK`, run `docker compose up -d`. This starts the
+old v2.0 app on the restored data. Your working tree is still on the
+`persistent-tracking` branch with the old files copied over it. To return to
+your original branch, run `git checkout -f <old branch> && git stash pop`.
 
 You can't downgrade a migrated database by running old images on it.
 Always roll back by restoring the archives.
@@ -506,13 +632,15 @@ Always roll back by restoring the archives.
 
 ```sh
 cd /path/to/your/plausible
-./upgrade/data-check.sh > before.txt               # optional sanity baseline
 docker compose exec -T plausible_db pg_dump -U postgres -Fc plausible_db > "plausible_db-$(date +%F).dump"
 git pull                                           # deployment files
-docker compose build --pull --no-cache plausible   # rebuild from PLAUSIBLE_SRC
-docker compose up -d                               # migrations run on start
+docker compose build --pull --no-cache plausible   # rebuild from PLAUSIBLE_SRC; the app keeps running
+docker compose up -d                               # short restart; migrations run on start
 docker compose logs -f plausible
 ```
+
+For bigger jumps, follow section 3 (backups, baseline, `data-check.sh`)
+instead.
 
 To pin a version, point `PLAUSIBLE_SRC` at a tag or commit
 (`…plausible-analytics-deviceid.git#<tag>`).
@@ -537,7 +665,10 @@ services:
 
 ### 5.3 Database engine updates
 
-Minor updates (`16.x`, `24.12.x`) only need `docker compose pull && docker compose up -d`.
+Minor updates (`16.x`, `24.12.x`) only need
+`docker compose pull --ignore-buildable && docker compose up -d`.
+`--ignore-buildable` skips the locally built `plausible` image, which can't
+be pulled.
 Major Postgres versions need the dump/restore from 3.5. For major ClickHouse
 versions, step through LTS releases as in 3.4.
 
@@ -556,6 +687,8 @@ if you configure a backup disk. The simplest consistent option is a short
 stop and an archive of the volume:
 
 ```sh
+PROJECT=$(docker inspect --format '{{ index .Config.Labels "com.docker.compose.project" }}' \
+  "$(docker compose ps -aq plausible_events_db)")
 docker compose stop plausible plausible_events_db
 docker run --rm -v "${PROJECT}_event-data:/volume:ro" -v "$PWD:/backup" alpine \
   tar -C /volume -czf "/backup/event-data-$(date +%F).tar.gz" .

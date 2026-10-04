@@ -50,15 +50,22 @@ keyed by `PERSISTENT_SALT_SECRET`. The prop is also stored as a normal custom pr
 Send it on every event, e.g. `plausible.init({ customProperties: { deviceId } })`.
 
 ```console
-$ $EDITOR plausible-conf.env                        # BASE_URL, SECRET_KEY_BASE, PERSISTENT_SALT_SECRET
-$ docker compose up -d --build                      # builds the fork from GitHub
-$ PLAUSIBLE_SRC=../plausible-analytics-deviceId docker compose up -d --build  # or from a local checkout
+$ $EDITOR plausible-conf.env      # BASE_URL, SECRET_KEY_BASE, PERSISTENT_SALT_SECRET
+$ echo 'PLAUSIBLE_SRC=https://github.com/kurdin/plausible-analytics-deviceid.git#claude/determined-cerf-dqrxgj' > .env
+$ docker compose up -d --build    # builds the fork from GitHub
 ```
+
+`PLAUSIBLE_SRC` picks the source to build. Use the branch above until the
+feature is merged into the fork's `master` (the compose default), or a local
+checkout such as `PLAUSIBLE_SRC=../plausible-analytics-deviceId`. Building
+`master` before the merge gives plain upstream Plausible, which silently
+ignores `ENABLE_PERSISTENT_TRACKING`.
 
 Upgrading an existing v2.0 install keeps the same service and volume names.
 ClickHouse 23.3 data is upgraded in place to 24.12. The Postgres volume was
-created with Postgres 14, so either run with `POSTGRES_VERSION=14` or migrate
-first with [upgrade/postgres.md](./upgrade/postgres.md).
+created with Postgres 14, so either set `POSTGRES_VERSION=14` in `.env` or
+dump and restore it into 16. Both are covered in
+[deployment.md section 3.5](./deployment.md#35-upgrade-postgresql-14--16-or-stay-on-14).
 
 > [!NOTE]
 > Persistent ids (especially the IP + user-agent fallback) depart from
@@ -68,8 +75,19 @@ first with [upgrade/postgres.md](./upgrade/postgres.md).
 **Step-by-step install, upgrade-from-v2.0 (no data loss) and rollback
 instructions: [deployment.md](./deployment.md).**
 
-See the fork's [`deploy/README.md`](https://github.com/kurdin/plausible-analytics-deviceid/blob/master/deploy/README.md)
+See the fork's [`deploy/README.md`](https://github.com/kurdin/plausible-analytics-deviceid/blob/claude/determined-cerf-dqrxgj/deploy/README.md)
 for how it works and the step-by-step verification (`curl` + Stats API).
+
+> [!IMPORTANT]
+> The sections below are the original upstream v2.0 guide. They describe the
+> pre-built `plausible/analytics:v2.0` image and v2.0 defaults. For this fork,
+> follow [deployment.md](./deployment.md) for install and upgrade. For current
+> configuration options, see the
+> [upstream configuration wiki](https://github.com/plausible/community-edition/wiki/configuration).
+> Notable changes since v2.0: `DISABLE_REGISTRATION` defaults to
+> `invite_only`; `MAILER_ADAPTER` defaults to `Bamboo.Mua`, and
+> `Bamboo.SMTPAdapter` is no longer supported (the app refuses to start with
+> it).
 
 ## Install
 
@@ -334,7 +352,7 @@ SECRET_KEY_BASE=GLVzDZW04FzuS1gMcmBRVhwgd4Gu9YmSl/k/TqfTUXti7FLBd7aflXeQDdwCj6Cz
 
 #### `DISABLE_REGISTRATION`
 
-Default: `true`
+Default: `invite_only` (was `true` in v2.0)
 
 Restricts registration of new users. Possible values are `true` (full restriction), `false` (no restriction), and `invite_only` (only the invited users can register).
 
@@ -486,7 +504,7 @@ Alternatively, you can use other [Bamboo Adapters](https://hexdocs.pm/bamboo/rea
 
 | Parameter          | Default                       | Description                                                                                                                                                                                                                                                                                             |
 | ------------------ | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `MAILER_ADAPTER`   | <kbd>Bamboo.SMTPAdapter</kbd> | Instead of the default, replace this with <kbd>Bamboo.PostmarkAdapter</kbd>, <kbd>Bamboo.MailgunAdapter</kbd>, <kbd>Bamboo.MandrillAdapter</kbd> or <kbd>Bamboo.SendGridAdapter</kbd> and add the appropriate variables below                                                                           |
+| `MAILER_ADAPTER`   | <kbd>Bamboo.Mua</kbd> (was <kbd>Bamboo.SMTPAdapter</kbd> in v2.0, which is no longer supported) | Instead of the default, replace this with <kbd>Bamboo.PostmarkAdapter</kbd>, <kbd>Bamboo.MailgunAdapter</kbd>, <kbd>Bamboo.MandrillAdapter</kbd> or <kbd>Bamboo.SendGridAdapter</kbd> and add the appropriate variables below                                                                           |
 | `POSTMARK_API_KEY` | --                            | Enter your Postmark API key.                                                                                                                                                                                                                                                                            |
 | `MAILGUN_API_KEY`  | --                            | Enter your Mailgun API key.                                                                                                                                                                                                                                                                             |
 | `MAILGUN_DOMAIN`   | --                            | Enter your Mailgun domain.                                                                                                                                                                                                                                                                              |
