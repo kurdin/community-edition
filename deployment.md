@@ -261,6 +261,11 @@ size.
 > `. ./upgrade.vars && : "${PROJECT:?}" "${BACKUP:?}"`. That line reloads them
 > and stops with an error if they're missing. Always run the steps from your
 > install directory, even in a new terminal.
+>
+> The steps that change data run as scripts in [`upgrade/`](./upgrade):
+> `backup.sh`, `postgres-16.sh` and `rollback.sh`. Each one stops at the
+> first error, checks what it produced, and ends with an explicit `… OK`
+> line. **If you don't see that line, don't continue.**
 
 ### 3.1 Prepare (old instance still running)
 
@@ -372,7 +377,7 @@ docker compose build plausible
 . ./upgrade.vars && : "${PROJECT:?}" "${BACKUP:?}"
 docker compose stop plausible
 date -u '+%Y-%m-%d %H:%M:%S' > "$BACKUP/cutoff.txt"
-cp upgrade/data-check.sh "$BACKUP/"
+cp upgrade/data-check.sh upgrade/rollback.sh "$BACKUP/"     # usable even after a rollback restores old files
 "$BACKUP/data-check.sh" > "$BACKUP/before.txt"
 cat "$BACKUP/before.txt"
 ```
@@ -381,24 +386,18 @@ cat "$BACKUP/before.txt"
 
 ```sh
 . ./upgrade.vars && : "${PROJECT:?}" "${BACKUP:?}"
-
-# logical Postgres dump (custom format, also used for the 14 -> 16 upgrade)
-docker compose exec -T plausible_db pg_dump -U postgres -Fc plausible_db > "$BACKUP/plausible_db.dump"
-
-# cold archives of every volume (databases stopped)
-docker compose stop
-for v in db-data event-data event-logs; do
-  docker run --rm -v "${PROJECT}_${v}:/volume:ro" -v "$BACKUP:/backup" alpine \
-    tar -C /volume -czf "/backup/${v}.tar.gz" .
-done
-
-# verify
-ls -lh "$BACKUP"
-for v in db-data event-data event-logs; do tar -tzf "$BACKUP/${v}.tar.gz" > /dev/null && echo "$v archive OK"; done
-docker compose start plausible_db
-docker compose exec -T plausible_db pg_restore --list < "$BACKUP/plausible_db.dump" | head -5
-docker compose stop plausible_db
+./upgrade/backup.sh
 ```
+
+[`upgrade/backup.sh`](./upgrade/backup.sh) does the following:
+1. Dumps Postgres (`pg_dump -Fc`).
+2. Stops all services.
+3. Archives `db-data`, `event-data` and `event-logs` with `tar` (through a
+   throw-away `alpine` container).
+4. Checks that every archive exists, isn't empty and is readable, and that
+   the dump can be listed by `pg_restore`.
+
+It ends with `BACKUP OK: <dir>`. The services stay stopped.
 
 Keep `$BACKUP` until you've run the new version for a while, and ideally
 copy it off the server too.
@@ -445,29 +444,18 @@ docker compose up -d --wait plausible_db
 restore. Postgres 16 refuses to start on a v14 data directory ("database files
 are incompatible with server") without changing it, so a mistake here is safe.
 
-Run it as one block. It stops at the first error and does nothing unless the
-dump exists:
-
 ```sh
-sh -eu <<'PG16'
-. ./upgrade.vars
-: "${PROJECT:?}" "${BACKUP:?}"
-[ -s "$BACKUP/plausible_db.dump" ] || { echo "missing $BACKUP/plausible_db.dump, aborting"; exit 1; }
-
-docker compose rm -sf plausible_db
-
-# keep the v14 data directory as an extra safety copy
-docker volume create "${PROJECT}_db-data-pg14"
-docker run --rm -v "${PROJECT}_db-data:/from:ro" -v "${PROJECT}_db-data-pg14:/to" alpine cp -a /from/. /to/
-
-# empty db-data in place (keeps the volume and its Compose labels), start 16, restore
-docker run --rm -v "${PROJECT}_db-data:/volume" alpine find /volume -mindepth 1 -delete
-docker compose up -d --wait plausible_db
-docker compose exec -T plausible_db createdb -U postgres plausible_db
-docker compose exec -T plausible_db pg_restore -U postgres -d plausible_db --exit-on-error < "$BACKUP/plausible_db.dump"
-echo "POSTGRES 16 RESTORE OK"
-PG16
+. ./upgrade.vars && : "${PROJECT:?}" "${BACKUP:?}"
+./upgrade/postgres-16.sh
 ```
+
+[`upgrade/postgres-16.sh`](./upgrade/postgres-16.sh) refuses to run if the
+dump is missing or `POSTGRES_VERSION` is still set in `.env`. It then:
+1. Copies the v14 data directory to the volume `${PROJECT}_db-data-pg14`.
+2. Empties `db-data` in place.
+3. Starts Postgres 16 and restores the dump with `pg_restore --exit-on-error`.
+
+It ends with `POSTGRES 16 RESTORE OK`.
 
 With either option, the Postgres part of the check must match the baseline:
 
@@ -564,62 +552,36 @@ Restoring the archives returns the install to its exact state at step 3.3.
 
 > [!WARNING]
 > A rollback **discards everything written after the upgrade started**: new
-> events, and any sites, users or goals created since. The block below
+> events, and any sites, users or goals created since. The script
 > archives the current state into `$BACKUP/pre-rollback/` first, so nothing
 > is destroyed. Copy that data over by hand later if you need it.
 
-Run the whole block from your install directory. It runs in its own `sh`,
-stops at the first error, and refuses to touch any volume unless all three
-archives are present:
+Run it from your install directory:
 
 ```sh
-sh -eu <<'ROLLBACK'
-. ./upgrade.vars
-: "${PROJECT:?}" "${BACKUP:?}"
-for v in db-data event-data event-logs; do
-  [ -s "$BACKUP/$v.tar.gz" ] || { echo "missing $BACKUP/$v.tar.gz, aborting"; exit 1; }
-done
-[ -d "$BACKUP/config" ] || { echo "missing $BACKUP/config, aborting"; exit 1; }
-
-# 1. safety copy of the current (post-upgrade) state
-mkdir -p "$BACKUP/pre-rollback"
-docker compose stop
-for v in db-data event-data event-logs; do
-  docker run --rm -v "${PROJECT}_${v}:/volume:ro" -v "$BACKUP/pre-rollback:/backup" alpine \
-    tar -C /volume -czf "/backup/${v}.tar.gz" .
-done
-cp docker-compose.yml plausible-conf.env "$BACKUP/pre-rollback/"
-[ -f .env ] && cp .env "$BACKUP/pre-rollback/"
-
-# 2. restore the volumes in place (keeps the volumes and their Compose labels)
-docker compose down
-for v in db-data event-data event-logs; do
-  docker run --rm -v "${PROJECT}_${v}:/volume" -v "$BACKUP:/backup:ro" alpine \
-    sh -c 'find /volume -mindepth 1 -delete && tar -C /volume -xzf "/backup/$0.tar.gz"' "$v"
-done
-
-# 3. restore the config files exactly as they were
-rm -f .env docker-compose.override.yml
-cp "$BACKUP/config/docker-compose.yml" "$BACKUP/config/plausible-conf.env" .
-for f in docker-compose.override.yml .env; do
-  [ -f "$BACKUP/config/$f" ] && cp "$BACKUP/config/$f" .
-done
-rm -rf clickhouse && cp -r "$BACKUP/config/clickhouse" .
-
-# 4. start only the databases (old images) and verify
-docker compose up -d plausible_db plausible_events_db
-until docker compose exec -T plausible_events_db clickhouse-client -q 'SELECT 1' >/dev/null 2>&1 \
-   && docker compose exec -T plausible_db pg_isready -U postgres -h 127.0.0.1 >/dev/null 2>&1; do sleep 2; done
-"$BACKUP/data-check.sh" "$(cat "$BACKUP/cutoff.txt")" > "$BACKUP/rollback.txt"
-diff "$BACKUP/before.txt" "$BACKUP/rollback.txt"
-echo "ROLLBACK DATA OK, start the app with: docker compose up -d"
-ROLLBACK
+. ./upgrade.vars && "$BACKUP/rollback.sh"
 ```
 
-If it prints `ROLLBACK DATA OK`, run `docker compose up -d`. This starts the
-old v2.0 app on the restored data. Your working tree is still on the
-`persistent-tracking` branch with the old files copied over it. To return to
-your original branch, run `git checkout -f <old branch> && git stash pop`.
+`rollback.sh` (copied to `$BACKUP` in step 3.2, so it's still there after
+the old files are restored) refuses to touch anything unless all three
+archives, the config backup, the baseline and the cutoff exist. It then:
+1. Archives the current state to `$BACKUP/pre-rollback/`.
+2. Restores the volumes **in place** (they keep their Compose labels).
+3. Restores `docker-compose.yml`, `plausible-conf.env`,
+   `docker-compose.override.yml`, `.env` and `clickhouse/` exactly as they
+   were.
+4. Starts only the databases (old images) and compares `data-check.sh`
+   against the baseline.
+
+It ends with `ROLLBACK DATA OK`. Then start the app:
+
+```sh
+docker compose up -d
+```
+
+Your working tree is still on the `persistent-tracking` branch, with the old
+files copied over it. To return to your original branch, run
+`git checkout -f <old branch> && git stash pop`.
 
 You can't downgrade a migrated database by running old images on it.
 Always roll back by restoring the archives.

@@ -16,11 +16,11 @@ set -eu
 CUTOFF="${1:-2100-01-01 00:00:00}"
 
 pg() {
-  docker compose exec -T plausible_db psql -U postgres -d plausible_db -At -c "$1"
+  docker compose exec -T plausible_db psql -U postgres -d plausible_db -At -c "$1" < /dev/null
 }
 
 ch() {
-  docker compose exec -T plausible_events_db clickhouse-client -d plausible_events_db -q "$1"
+  docker compose exec -T plausible_events_db clickhouse-client -d plausible_events_db -q "$1" < /dev/null
 }
 
 echo "## PostgreSQL (plausible_db)"
