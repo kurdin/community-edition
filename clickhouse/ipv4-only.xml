@@ -1,0 +1,4 @@
+<clickhouse>
+    <!-- Listen on IPv4 only, avoids startup failures on hosts with IPv6 disabled -->
+    <listen_host>0.0.0.0</listen_host>
+</clickhouse>

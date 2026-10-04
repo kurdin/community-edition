@@ -1,44 +1,66 @@
-version: "3.3"
 services:
   mail:
     image: bytemark/smtp
     restart: always
 
   plausible_db:
-    # Plausible v2.0.0 was tested against PostgreSQL versions 12, 13, and 14
-    # https://github.com/plausible/analytics/blob/v2.0.0/.github/workflows/elixir.yml#L16
-    image: postgres:14-alpine
+    # Existing v2.0 installs created their volume with postgres:14. Keep
+    # POSTGRES_VERSION=14 or follow upgrade/postgres.md before bumping it.
+    image: postgres:${POSTGRES_VERSION:-16}-alpine
     restart: always
     volumes:
       - db-data:/var/lib/postgresql/data
     environment:
       - POSTGRES_PASSWORD=postgres
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      start_period: 1m
 
   plausible_events_db:
-    image: clickhouse/clickhouse-server:23.3.7.5-alpine
+    image: clickhouse/clickhouse-server:${CLICKHOUSE_VERSION:-24.12}-alpine
     restart: always
     volumes:
       - event-data:/var/lib/clickhouse
       - event-logs:/var/log/clickhouse-server
       - ./clickhouse/clickhouse-config.xml:/etc/clickhouse-server/config.d/logging.xml:ro
       - ./clickhouse/clickhouse-user-config.xml:/etc/clickhouse-server/users.d/logging.xml:ro
+      - ./clickhouse/ipv4-only.xml:/etc/clickhouse-server/config.d/ipv4-only.xml:ro
+      # Uncomment on small servers (< 4GB RAM):
+      # - ./clickhouse/low-resources.xml:/etc/clickhouse-server/config.d/low-resources.xml:ro
     ulimits:
       nofile:
         soft: 262144
         hard: 262144
+    environment:
+      - CLICKHOUSE_SKIP_USER_SETUP=1
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 -O - http://127.0.0.1:8123/ping || exit 1"]
+      start_period: 1m
 
   plausible:
-    image: plausible/analytics:v2.0
+    # Built from the persistent-tracking fork instead of the pre-built image.
+    # PLAUSIBLE_SRC can be a git URL (optionally with #branch) or a local
+    # checkout, e.g. PLAUSIBLE_SRC=../plausible-analytics-deviceId
+    build:
+      context: ${PLAUSIBLE_SRC:-https://github.com/kurdin/plausible-analytics-deviceid.git#master}
+      args:
+        MIX_ENV: ce
+    image: plausible-deviceid:local
     restart: always
-    command: sh -c "sleep 10 && /entrypoint.sh db createdb && /entrypoint.sh db migrate && /entrypoint.sh run"
+    command: sh -c "/entrypoint.sh db createdb && /entrypoint.sh db migrate && /entrypoint.sh run"
     depends_on:
-      - plausible_db
-      - plausible_events_db
-      - mail
+      plausible_db:
+        condition: service_healthy
+      plausible_events_db:
+        condition: service_healthy
+      mail:
+        condition: service_started
     ports:
       - 127.0.0.1:8000:8000
     env_file:
       - plausible-conf.env
+    volumes:
+      - plausible-data:/var/lib/plausible
 
 volumes:
   db-data:
@@ -47,4 +69,5 @@ volumes:
     driver: local
   event-logs:
     driver: local
-
+  plausible-data:
+    driver: local

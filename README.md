@@ -30,6 +30,44 @@
 
 ---
 
+## Persistent tracking fork
+
+This setup builds Plausible from the
+[plausible-analytics-deviceId](https://github.com/kurdin/plausible-analytics-deviceid) fork
+instead of pulling `plausible/analytics`. The fork adds **opt-in**
+persistent visitor ids, so unique visitors deduplicate across days. With
+`ENABLE_PERSISTENT_TRACKING=false` it behaves exactly like upstream.
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `ENABLE_PERSISTENT_TRACKING` | `false` | `true` derives a stable `user_id` instead of using the daily rotating salt. |
+| `PERSISTENT_SALT_SECRET` | none | Required when enabled, at least 16 bytes (`openssl rand -base64 48`). Keep it stable. |
+| `PERSISTENT_TRACKING_DEVICE_ID_PROP` | `deviceId` | Custom property that carries the client-side device id. |
+
+With tracking enabled, an event with a `deviceId` custom property is identified by
+`hash(site_id + deviceId)`. Without one, it falls back to `hash(site_id + IP + user agent)`,
+keyed by `PERSISTENT_SALT_SECRET`. The prop is also stored as a normal custom property.
+Send it on every event, e.g. `plausible.init({ customProperties: { deviceId } })`.
+
+```console
+$ $EDITOR plausible-conf.env                        # BASE_URL, SECRET_KEY_BASE, PERSISTENT_SALT_SECRET
+$ docker compose up -d --build                      # builds the fork from GitHub
+$ PLAUSIBLE_SRC=../plausible-analytics-deviceId docker compose up -d --build  # or from a local checkout
+```
+
+Upgrading an existing v2.0 install keeps the same service and volume names.
+ClickHouse 23.3 data is upgraded in place to 24.12. The Postgres volume was
+created with Postgres 14, so either run with `POSTGRES_VERSION=14` or migrate
+first with [upgrade/postgres.md](./upgrade/postgres.md).
+
+> [!NOTE]
+> Persistent ids (especially the IP + user-agent fallback) depart from
+> Plausible's default privacy model. Check your GDPR/ePrivacy obligations
+> before enabling them.
+
+See the fork's [`deploy/README.md`](https://github.com/kurdin/plausible-analytics-deviceid/blob/master/deploy/README.md)
+for how it works and the step-by-step verification (`curl` + Stats API).
+
 ## Install
 
 Plausible Community Edition (or CE for short) is designed to be self-hosted through Docker. You don't have to be a Docker expert to launch your own instance, but you should have a basic understanding of the command-line and networking to successfully set it up.
