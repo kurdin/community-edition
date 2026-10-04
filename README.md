@@ -65,6 +65,9 @@ first with [upgrade/postgres.md](./upgrade/postgres.md).
 > Plausible's default privacy model. Check your GDPR/ePrivacy obligations
 > before enabling them.
 
+**Step-by-step install, upgrade-from-v2.0 (no data loss) and rollback
+instructions: [deployment.md](./deployment.md).**
+
 See the fork's [`deploy/README.md`](https://github.com/kurdin/plausible-analytics-deviceid/blob/master/deploy/README.md)
 for how it works and the step-by-step verification (`curl` + Stats API).
 
