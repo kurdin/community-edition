@@ -282,6 +282,36 @@ last day. Approximate `uniq`.
 - **Concurrency:** could `record_boot/1` race when several app nodes boot at
   once (two open periods)?
 
+## Round 5: fixes for the independent DAU/WAU/MAU review (fork `66d99ba..b26b074`)
+
+`git diff 66d99ba..b26b074` in the fork. All ten findings were confirmed
+against the code and fixed:
+
+| # | Finding | Fix |
+| --- | --- | --- |
+| 1 | **Blocker:** endless re-render on the dashboard (`useQuery` returns a new result object per render) | Memoize on the stable `data` refs (`mergeActiveUsersData`). The render test in `fetch-top-stats-active-users.test.tsx` fails on the old code with "Maximum update depth exceeded" (71 updates) and passes now. |
+| 2 | Whole range scanned with a 30× fan-out even though tiles need one day | `ActiveUsers.reported_days/2`: last day / bucket ends / every day; the states range starts 29 days before the first reported day |
+| 3 | Warning anchored on the range start; no native-stats clamp | `reported_day_bounds/1` anchors the windows; clamped to `site_native_stats_start_at`; tests updated (DAU tile not warned) |
+| 4 | `PERSISTENT_TRACKING_SINCE` hid later gaps | The synthetic period ends at the first recorded period |
+| 5 | An empty `PERSISTENT_TRACKING_SINCE=` crashed the boot | Treated as unset |
+| 6 | Placeholder (previous period) values merged; graph selection lost on reload; 400 on hourly views | Skip placeholder/mismatched merges; keep the stored selection while active users load; `graphMetric` falls back to visitors on hour/minute |
+| 7 | `record_boot` race / partial close | `update_all` closes every open period; new migration `20261005090001` adds a unique partial index (single open period), insert `on_conflict: :nothing` |
+| 8 | Two time dimensions crashed (500) | Rejected in validation (400) |
+| 9, 10 | Docs | No generic `time` dimension; "or today" for ranges past today |
+
+**Verified here:**
+- `reported_days` + `rolling_query` + `bucket` run in the ecto 3.14.2 /
+  ecto_ch 0.11.1 harness on ClickHouse 24.12: all earlier expectations hold.
+  A 6-week `time:week` range gives the Sunday values, and a 2-month
+  `time:month` range checks out.
+- `Periods` compiles without warnings, and the coverage cases pass.
+- Elixir files format clean with Ecto's `locals_without_parens`.
+- `tsc`, eslint, prettier; Jest 35 suites / 527 tests.
+
+**Still not verified:** `mix test` / `mix compile --warnings-as-errors`
+(hex.pm is blocked), including the updated ExUnit tests and the new
+migration.
+
 ## Output wanted
 
 Findings ranked most severe first, each with: severity (P0–P3),

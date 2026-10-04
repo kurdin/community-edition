@@ -211,9 +211,11 @@ and Monthly active users** tiles, and the Stats API accepts the metrics
 * WAU: unique visitors in the 7 days ending on the day.
 * MAU: unique visitors in the 30 days ending on the day.
 
-Tiles show the value on the last day of the selected range. Click a tile to
-graph it per day, week or month. These metrics have no hourly view, and they
-can't be combined with other metrics in one API query.
+Tiles show the value on the last day of the selected range, or today if
+the range extends past today. Click a tile to graph it per day, week or
+month. These metrics have no hourly view, they can't be combined with other
+metrics in one API query, and they don't support the generic `time`
+dimension.
 
 They're only accurate for days tracked with persistent ids. The app records
 when persistent tracking was switched on. A tile whose window reaches back
