@@ -1,7 +1,7 @@
 # Combined review handoff: persistent tracking, lossless upgrade, DAU/WAU/MAU
 
 This is a single, self-contained handoff for everything built so far, plus all
-review findings and their fixes (rounds 1–6). You're reviewing the final
+review findings and their fixes (rounds 1–7). You're reviewing the final
 state. **Report findings only; don't change files.**
 
 ## 1. Repositories, branch, commits
@@ -22,9 +22,10 @@ git fetch origin claude/determined-cerf-dqrxgj && git checkout claude/determined
 | `66d99ba` | C. DAU/WAU/MAU metrics, persistent tracking periods, dashboard tiles |
 | `b26b074` | Round 5 fixes for DAU/WAU/MAU (render loop, reported days, warnings, periods) |
 | `712bd27` | Round 6 doc fixes (npm tracker example, arm64 override) |
+| `3a8c83b` | Round 7: coverage per reported window and for the comparison period; `SINCE` seed persisted at boot |
 
-Whole feature: `git diff d21298d..712bd27`. By area: `git diff d21298d..534f84c` (A),
-`git diff 534f84c..712bd27` (C and later fixes).
+Whole feature: `git diff d21298d..3a8c83b`. By area: `git diff d21298d..534f84c` (A),
+`git diff 534f84c..3a8c83b` (C and later fixes). Round 7 only: `git diff 712bd27..3a8c83b`.
 
 ### `kurdin/community-edition` (Docker deployment; base `06f122f` = upstream v2.0)
 
@@ -36,9 +37,10 @@ Whole feature: `git diff d21298d..712bd27`. By area: `git diff d21298d..534f84c`
 | `59efeb5`, `5a33bc4` | B. Script flow `backup → migrate (staged) → verify → finalize/rollback` |
 | `a4f7aeb` | Default `PLAUSIBLE_SRC` = feature branch |
 | `c6f45ef`…`d5cbc53` | Handoffs; DAU/WAU/MAU docs |
-| HEAD | Round 6 fixes (v2.1.0 stage, rollback archives, cutoff for Postgres counts, quoting, Compose minimum) + this file |
+| `967c4b0` | Round 6 fixes (v2.1.0 stage, rollback archives, cutoff for Postgres counts, quoting, Compose minimum) |
+| HEAD | Round 7 fixes (TOTP key for v2.1.0/v2.1.1, `sessions_v2` pre-conversion, baseline with cutoff) + this file |
 
-Whole feature: `git diff 06f122f..HEAD`.
+Whole feature: `git diff 06f122f..HEAD`. Round 7 only: `git diff 967c4b0..HEAD`.
 
 ## 2. What was built
 
@@ -78,17 +80,23 @@ Whole feature: `git diff 06f122f..HEAD`.
   output and ends with an explicit OK line.
   - `backup.sh`:
     - writes the config files, `pg_dump -Fc`, cold volume tars and a
-      baseline (`before.txt`, `cutoff.txt`) into `./backups/<ts>`
-      (`BACKUP_DIR` overrides);
+      baseline (`before.txt`, counted with the cutoff in `cutoff.txt`, like
+      every later check) into `./backups/<ts>` (`BACKUP_DIR` overrides);
     - writes `upgrade.vars`.
   - `postgres-16.sh`: optional 14 → 16 dump/restore. It keeps a
     `<project>_db-data-pg14` volume copy.
   - `migrate.sh`:
-    - ClickHouse 23.8 → 24.3, then the official images **v2.1.0 → v2.1.1 →
-      v2.1.5**;
+    - ClickHouse 23.8 → 24.3, then its own `sessions_v2` →
+      `VersionedCollapsingMergeTree` conversion (`convert_sessions_v2`, the
+      upstream SQL with the EXCHANGE → two-renames fallback for error 48,
+      resumable between the renames), then the official images **v2.1.0 →
+      v2.1.1 → v2.1.5**;
+    - v2.1.0/v2.1.1 get a throwaway `TOTP_VAULT_KEY` (`-e`, only those two
+      stages, only if `plausible-conf.env` has none). Config is not changed;
+      the fork derives its key from `SECRET_KEY_BASE` when unset;
     - ClickHouse 24.8 → 24.12, then **v3.0.1 → v3.1.0 → v3.2.0**, then the
       fork;
-    - checks counts after each stage, can be resumed
+    - checks counts (before the cutoff) after each stage, can be resumed
       (`$BACKUP/migrate.done`), never downgrades ClickHouse;
     - runs stage images through `upgrade/stage-image.yml`.
   - `verify.sh`: readiness check plus `data-check.sh` diffed against the
@@ -100,7 +108,8 @@ Whole feature: `git diff 06f122f..HEAD`.
     - re-checks the data first (`--ignore-data-check` for expected
       differences);
     - checks `sessions_v2` was converted;
-    - deletes the backup and the leftovers;
+    - deletes the backup and the leftovers (`sessions_v2_tmp_versioned`,
+      `sessions_v2_backup*`);
     - confirms first (`--yes` skips the prompt).
   - `data-check.sh`:
     - Postgres counts (users, sites, shared links, api keys, distinct
@@ -142,11 +151,18 @@ Whole feature: `git diff 06f122f..HEAD`.
     - `record_boot/1` runs as a Task in `application.ex` (disabled in the
       test config);
     - `coverage/3`;
-    - `PERSISTENT_TRACKING_SINCE` seeds earlier installs; it ends at the
-      first recorded period, and an empty value counts as unset.
-  - `QueryBuilder.set_active_users_coverage/1` anchors on the reported days
-    and clamps to the native stats start.
-  - `QueryResult.metric_warning/2` emits `persistent_tracking_partial`.
+    - `PERSISTENT_TRACKING_SINCE` seeds earlier installs. On the first boot
+      with an empty table it's stored as a real period (open if enabled,
+      ended at that boot if disabled); with recorded rows that start later,
+      `list/0` adds it as a synthetic period ending at the first one. An
+      empty value counts as unset.
+  - `QueryBuilder.set_active_users_coverage/1` (runs after
+    `put_comparison_utc_time_range/1`) checks each window from
+    `ActiveUsers.reported_windows/2` (one per reported day, merged when they
+    overlap or touch), clamped to the native stats start and `now`, for the
+    main range and, if compared, the comparison range.
+  - `QueryResult.metric_warning/2` emits `persistent_tracking_partial` with
+    `scope: :period | :comparison`.
 - **Dashboard:**
   - `data-persistent-tracking` → `site-context.tsx`;
   - `fetch-top-stats.ts` makes a separate `active-users` request and merges
@@ -155,7 +171,8 @@ Whole feature: `git diff 06f122f..HEAD`.
   - `isGraphableMetric` (day/week/month only);
   - `visitor-graph.tsx` graphs visitors on hour/minute and keeps the stored
     selection while active users load;
-  - labels, formatters, and the `*` warning text.
+  - labels, formatters, and the `*` warning text (separate text for
+    `scope: comparison`).
 - **Tests:**
   - `test/plausible/stats/query/query_active_users_test.exs`
   - `test/plausible_web/controllers/api/external_stats_controller/query_active_users_test.exs`
@@ -196,6 +213,12 @@ Whole feature: `git diff 06f122f..HEAD`.
 | 6 | npm tracker example unusable (`domain` required, `endpoint` defaults to plausible.io) | Separate npm example with `import { init }`, domain, endpoint (fork `deploy/README.md`) |
 | 6 | arm64 note left `depends_on: mail` | Full override documented (both repos) |
 | 6 | Compose minimum too low for `!override` | Docker Compose v2.24.4+ |
+| 7 | **P1** v2.1.0/v2.1.1 refuse to boot without `TOTP_VAULT_KEY` | Throwaway key passed with `-e` to those two stages only, when the config has none (`migrate.sh`, `deployment.md`) |
+| 7 | **P1** v2.1.0's `sessions_v2` conversion only handles EXCHANGE error 1, crashes on 48 (plausible/analytics#4167) | `convert_sessions_v2` before v2.1.0: upstream SQL, row check, EXCHANGE or two renames (backup name suffixed if taken), resumes an interrupted swap; v2.1.0 then sees it versioned and skips (`migrate.sh`, `finalize.sh`) |
+| 7 | Baseline counted without the cutoff, later checks with it | `backup.sh` passes `cutoff.txt`; `migrate.sh` `check_counts` filters by it |
+| 7 | `SINCE` seed stayed open forever after a disabled first boot | Stored as a real period at boot (`periods.ex`) + tests |
+| 7 | Comparison period coverage ignored | Checked too; `scope: :comparison` warning (`query_builder.ex`, `query_result.ex`, `top-stats.js`) + test |
+| 7 | Coverage used the interval spanning all reported windows | Per window via `ActiveUsers.reported_windows/2` + test |
 
 ## 4. Verification
 
@@ -210,6 +233,14 @@ Whole feature: `git diff 06f122f..HEAD`.
     single, week, month, filtered, empty);
   - also a 6-week `time:week` range and a 2-month `time:month` range.
 - **`Periods`:** compiles with no warnings; coverage cases pass.
+- **Round 7 harness** (35 checks, all pass), with postgrex 0.22.4 (the
+  `mix.lock` version) against real Postgres 16:
+  - the real `periods.ex`: `record_boot/1` seed on enabled and disabled first
+    boots, no re-seed, a future `SINCE`, existing rows, then `list/0`;
+  - `reported_windows/2` and `set_active_users_coverage/1`, copied verbatim
+    from the sources by a script (only `Query.date_range`, `DateTimeRange.new!`
+    and `get_comparison_query` stubbed, UTC): merging, gaps between windows,
+    comparison scope and `since`, native-start clamp.
 - **Elixir formatting:** clean, with Ecto's `locals_without_parens`.
 - **Frontend:**
   - `tsc`, eslint, prettier, Jest 35 suites / 527 tests;
@@ -227,6 +258,16 @@ Whole feature: `git diff 06f122f..HEAD`.
     unchanged;
   - `finalize` refuses after deleting pre-upgrade events, and
     `--ignore-data-check` overrides.
+- **Round 7 rehearsals** (fresh v2.0-shaped data, path with spaces, stub
+  release images that fail like v2.1.0/v2.1.1 without a 32-byte key, plus
+  one event and one session timestamped 2099):
+  - baseline excludes the 2099 rows; every stage's count check matched;
+  - EXCHANGE path; the old table is dropped by `finalize`;
+  - forced EXCHANGE failure: rename fallback with a pre-existing
+    `sessions_v2_backup` (suffixed name used), interrupted between the
+    renames, rerun finished the swap, `finalize` dropped both leftovers;
+  - the throwaway key reached only v2.1.0/v2.1.1; an existing key in
+    `plausible-conf.env` was used as is.
 - `docker compose config` passes for both repos, including the arm64
   override.
 
@@ -241,6 +282,11 @@ Whole feature: `git diff 06f122f..HEAD`.
   rehearsal.
 - The new migrations against a real Postgres via `mix ecto.migrate`.
 - `finalize.sh`'s interactive prompt (only `--yes` was tested).
+- The real v2.1.0 image skipping its conversion on an already versioned
+  table (read from its source: it checks the engine first and prints
+  "already versioned, no migration needed").
+- A real ClickHouse returning error 48 on EXCHANGE (forced with a different
+  failing EXCHANGE instead).
 
 ## 5. Please scrutinise
 
@@ -258,15 +304,22 @@ Whole feature: `git diff 06f122f..HEAD`.
    - `time_labels` / `empty_metrics` for the dashboard graph;
    - the `has(?, ? + ?)` reported-days filter with `type(^days, {:array,
      :date})`.
-3. **Warning semantics:** coverage anchored on the reported days, clamped to
-   the native stats start; comparison results inherit the main query's
-   coverage.
-4. **Frontend merge:** `useTopStatsQuery` / `mergeActiveUsersData`, and the
+3. **Warning semantics:** per reported window, clamped to the native stats
+   start and `now`; comparison windows checked too (`scope`), `since` from
+   the main range unless only the comparison is uncovered. `SINCE` seeding
+   at boot: concurrent first boots (disabled) could insert two identical
+   closed rows; is that harmless?
+4. **`convert_sessions_v2` vs upstream `VersionedSessions`:** same DDL
+   (`AS sessions_v2`, engine, keys, `SAMPLE BY`, extracted `SETTINGS`), `ATTACH
+   PARTITION ID` vs upstream's `ATTACH PARTITION '<partition>'`, the
+   fallback, and the resume path. The throwaway TOTP key: is any data
+   encrypted with it by v2.1.0/v2.1.1 migrations?
+5. **Frontend merge:** `useTopStatsQuery` / `mergeActiveUsersData`, and the
    `visitor-graph.tsx` fallback and `graphMetric`.
-5. **Scripts:** `set -eu` edge cases, quoting, `find -delete` in-place
+6. **Scripts:** `set -eu` edge cases, quoting, `find -delete` in-place
    restores, `data-check.sh`'s `inserted_at < cutoff` on all five tables,
    `finalize.sh` options.
-6. **Docs vs. code:** `deployment.md`, `README.md`, the fork's
+7. **Docs vs. code:** `deployment.md`, `README.md`, the fork's
    `deploy/README.md`, the JSON schema descriptions.
 
 ## 6. Commands

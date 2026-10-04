@@ -284,7 +284,10 @@ ClickHouse migrations create.
    data volumes and your config files, and verifies all of them.
 2. **A baseline of the data.** `backup.sh` records counts of users, sites,
    distinct goals, shared links and API keys; event and session counts;
-   per-site visitors and a checksum of all events; and imported rows.
+   per-site visitors and a checksum of all events; and imported rows. All
+   of it counts only rows from before the cutoff recorded at backup time,
+   and so do the later checks. Rows timestamped later (clock skew, events
+   flushed in the same second) can't cause a false mismatch.
    `migrate.sh` re-checks the event and session counts after every stage,
    and `verify.sh` compares the full baseline at the end.
 3. **The backup stays untouched until you finalize.** `rollback.sh`
@@ -449,12 +452,23 @@ files are incompatible with server") without changing it.
 
 [`upgrade/migrate.sh`](./upgrade/migrate.sh):
 1. Upgrades ClickHouse to 23.8 and 24.3.
-2. Runs the migrations of Plausible CE v2.1.0, v2.1.1 and v2.1.5.
-3. Upgrades ClickHouse to 24.8 and 24.12.
-4. Runs the migrations of v3.0.1, v3.1.0, v3.2.0 and finally the fork.
+2. Converts `sessions_v2` to `VersionedCollapsingMergeTree` itself, with the
+   same SQL as upstream's data migration. v2.1.0's own conversion crashes
+   when ClickHouse can't `EXCHANGE` tables (error 48, common in Docker,
+   [plausible/analytics#4167](https://github.com/plausible/analytics/issues/4167)).
+   The script falls back to two renames in that case, as v2.1.1 does, and
+   v2.1.0 then finds the table already converted.
+3. Runs the migrations of Plausible CE v2.1.0, v2.1.1 and v2.1.5. v2.1.0
+   and v2.1.1 refuse to start without `TOTP_VAULT_KEY`. If your
+   `plausible-conf.env` has none, they get a throwaway key for the
+   migration only. A v2.0 install has no 2FA data to encrypt, later releases
+   don't need the variable, and your config is not changed.
+4. Upgrades ClickHouse to 24.8 and 24.12.
+5. Runs the migrations of v3.0.1, v3.1.0, v3.2.0 and finally the fork.
 
-After every stage it checks that the event and session counts still match
-the backup. It must end with **`MIGRATIONS OK`**.
+After every stage it checks that the event and session counts from before
+the backup cutoff still match the backup. It must end with
+**`MIGRATIONS OK`**.
 
 * On large datasets some stages take a while: ClickHouse rewrites data to
   normalise source names and add columns. **Don't interrupt it.** If it
@@ -515,7 +529,8 @@ If a difference is expected, for example a site you deleted after the
 upgrade, review the printed diff and run
 `./upgrade/finalize.sh --ignore-data-check`. Then it shows what it will delete and asks you to type `delete`:
 * the backup directory;
-* the old `sessions_v2` table kept by the engine conversion (only once
+* the old `sessions_v2` table kept by the engine conversion
+  (`sessions_v2_tmp_versioned` or `sessions_v2_backup*`; only once
   `sessions_v2` is confirmed converted);
 * the `<project>_db-data-pg14` volume (option B only);
 * `upgrade.vars`.

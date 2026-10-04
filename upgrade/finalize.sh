@@ -11,7 +11,7 @@
 # removes:
 #   * the backup directory ($BACKUP from upgrade.vars)
 #   * the ClickHouse table left by the sessions_v2 engine conversion
-#     (sessions_v2_tmp_versioned or sessions_v2_backup)
+#     (sessions_v2_tmp_versioned or sessions_v2_backup[_<time>])
 #   * the ${PROJECT}_db-data-pg14 volume (only exists after a Postgres 16 move)
 #   * upgrade.vars
 # After this, rolling back is no longer possible.
@@ -33,7 +33,7 @@ done
 
 echo "This permanently deletes:"
 echo "  backup directory:  $BACKUP ($(du -sh "$BACKUP" 2>/dev/null | cut -f1))"
-echo "  ClickHouse tables: sessions_v2_tmp_versioned / sessions_v2_backup (if present)"
+echo "  ClickHouse tables: sessions_v2_tmp_versioned / sessions_v2_backup* (if present)"
 echo "  Docker volume:     ${PROJECT}_db-data-pg14 (if present)"
 echo "After this you can no longer roll back."
 if [ "$YES" != true ]; then
@@ -62,7 +62,10 @@ case "$engine" in
   *) echo "sessions_v2 is '$engine', not VersionedCollapsingMergeTree: the migration didn't finish, not deleting anything" >&2; exit 1 ;;
 esac
 
-for table in sessions_v2_tmp_versioned sessions_v2_backup; do
+leftovers=$(docker compose exec -T plausible_events_db clickhouse-client -d plausible_events_db \
+  -q "SELECT name FROM system.tables WHERE database = currentDatabase()
+        AND (name = 'sessions_v2_tmp_versioned' OR name LIKE 'sessions\\_v2\\_backup%')" < /dev/null)
+for table in $leftovers; do
   docker compose exec -T plausible_events_db clickhouse-client -d plausible_events_db \
     -q "DROP TABLE IF EXISTS $table" < /dev/null
 done

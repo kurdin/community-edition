@@ -46,7 +46,9 @@ done
 echo "-> recording the data baseline"
 date -u '+%Y-%m-%d %H:%M:%S' > "$BACKUP/cutoff.txt"
 cp "$SCRIPTS_DIR/data-check.sh" "$SCRIPTS_DIR/rollback.sh" "$SCRIPTS_DIR/finalize.sh" "$BACKUP/"
-"$BACKUP/data-check.sh" > "$BACKUP/before.txt"
+# counted with the same cutoff as every later check (verify, rollback,
+# finalize), so rows timestamped after it never cause a mismatch
+"$BACKUP/data-check.sh" "$(cat "$BACKUP/cutoff.txt")" > "$BACKUP/before.txt"
 
 echo "-> copying config files"
 for f in docker-compose.yml docker-compose.override.yml plausible-conf.env .env; do

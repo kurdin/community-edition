@@ -25,6 +25,15 @@
 # columns/tables (import_id, imported_custom_events) that only v2.1.0's
 # ClickHouse migrations create.
 # ClickHouse versions older than the one you already run are skipped too.
+#
+# Two workarounds for the v2.1.0 stage:
+#   * v2.1.0/v2.1.1 refuse to boot without TOTP_VAULT_KEY. If plausible-conf.env
+#     has none, those stages get a throwaway key (v2.0 has no 2FA data to
+#     encrypt, and later releases don't need it). Your config isn't changed.
+#   * v2.1.0's sessions_v2 engine conversion crashes when ClickHouse can't
+#     EXCHANGE tables (error 48, plausible/analytics#4167). This script does
+#     that conversion first, with the same SQL and the same non-atomic rename
+#     fallback as v2.1.1, so v2.1.0 finds it already done.
 # Prints "MIGRATIONS OK" at the end.
 set -eu
 
@@ -56,10 +65,16 @@ stage_compose() {
 expected_events=$(sed -n 's/^events_v2 rows: //p' "$BACKUP/before.txt")
 expected_sessions=$(sed -n 's/^sessions_v2 sessions: //p' "$BACKUP/before.txt")
 [ -n "$expected_events" ] && [ -n "$expected_sessions" ] || { echo "can't read counts from before.txt" >&2; exit 1; }
+# the baseline counts rows before the cutoff (upgrade/data-check.sh), so count the same rows
+CUTOFF=$(cat "$BACKUP/cutoff.txt")
+
+ch() {
+  docker compose exec -T plausible_events_db clickhouse-client -d plausible_events_db -q "$1" < /dev/null
+}
 
 check_counts() {
-  counts=$(docker compose exec -T plausible_events_db clickhouse-client -q \
-    "SELECT (SELECT count() FROM plausible_events_db.events_v2), (SELECT sum(sign) FROM plausible_events_db.sessions_v2) FORMAT CSV" < /dev/null)
+  counts=$(ch "SELECT (SELECT count() FROM events_v2 WHERE timestamp < toDateTime('$CUTOFF')),
+                      (SELECT sum(sign) FROM sessions_v2 WHERE start < toDateTime('$CUTOFF')) FORMAT CSV")
   if [ "$counts" != "$expected_events,$expected_sessions" ]; then
     echo "event/session counts changed: expected $expected_events,$expected_sessions, got $counts" >&2
     exit 1
@@ -104,20 +119,106 @@ clickhouse_to() {
   done
 }
 
+# v2.1.0 and v2.1.1 refuse to start without TOTP_VAULT_KEY (base64, 32 bytes).
+# Pass a throwaway one to those two stages if the config has none; an
+# existing key is used as is.
+if grep -q '^TOTP_VAULT_KEY=.' plausible-conf.env 2> /dev/null; then
+  TOTP_VAULT_KEY=
+else
+  TOTP_VAULT_KEY=$(head -c 32 /dev/urandom | base64 | tr -d '\n')
+fi
+
 migrate_with() {
   image=$1
   if done_step "migrate-$image"; then return; fi
   echo "-> migrating with $image (ClickHouse $ch_current)"
-  STAGE_IMAGE="$image" CLICKHOUSE_VERSION="$ch_current" \
-    stage_compose run --rm plausible db migrate
+  case "$image" in
+    *:v2.1.0 | *:v2.1.1) totp_key=$TOTP_VAULT_KEY ;;
+    *) totp_key= ;;
+  esac
+  if [ -n "$totp_key" ]; then
+    STAGE_IMAGE="$image" CLICKHOUSE_VERSION="$ch_current" \
+      stage_compose run --rm -e TOTP_VAULT_KEY="$totp_key" plausible db migrate
+  else
+    STAGE_IMAGE="$image" CLICKHOUSE_VERSION="$ch_current" \
+      stage_compose run --rm plausible db migrate
+  fi
   check_counts
   mark_done "migrate-$image"
+}
+
+# sessions_v2: CollapsingMergeTree -> VersionedCollapsingMergeTree, as in
+# upstream's VersionedSessions data migration (single node). The partitions
+# are attached to a new table (hard links, no data copied), then the tables
+# are swapped. Without EXCHANGE support (error 48 in some Docker setups) the
+# swap is two renames and the old table stays as sessions_v2_backup.
+# finalize.sh drops the leftover table.
+convert_sessions_v2() {
+  if done_step "sessions-v2-versioned"; then return; fi
+  engine=$(ch "SELECT engine FROM system.tables WHERE database = currentDatabase() AND name = 'sessions_v2'")
+  case "$engine" in
+    VersionedCollapsingMergeTree)
+      echo "-> sessions_v2 is already versioned"
+      mark_done "sessions-v2-versioned"
+      return
+      ;;
+    CollapsingMergeTree) ;;
+    "")
+      # interrupted between the two renames below: finish the swap
+      if [ "$(ch "SELECT engine FROM system.tables WHERE database = currentDatabase() AND name = 'sessions_v2_tmp_versioned'")" = "VersionedCollapsingMergeTree" ]; then
+        echo "-> finishing the interrupted sessions_v2 swap"
+        ch "RENAME TABLE sessions_v2_tmp_versioned TO sessions_v2"
+        check_counts
+        mark_done "sessions-v2-versioned"
+        return
+      fi
+      echo "sessions_v2 table not found" >&2; exit 1
+      ;;
+    *) echo "unexpected sessions_v2 engine '$engine'" >&2; exit 1 ;;
+  esac
+
+  echo "-> converting sessions_v2 to VersionedCollapsingMergeTree"
+  settings=$(ch "SELECT extract(engine_full, 'SETTINGS .+') FROM system.tables
+                 WHERE database = currentDatabase() AND name = 'sessions_v2'")
+  ch "DROP TABLE IF EXISTS sessions_v2_tmp_versioned"
+  ch "CREATE TABLE sessions_v2_tmp_versioned AS sessions_v2
+      ENGINE = VersionedCollapsingMergeTree(sign, events)
+      PARTITION BY toYYYYMM(start)
+      PRIMARY KEY (site_id, toDate(start), user_id, session_id)
+      ORDER BY (site_id, toDate(start), user_id, session_id)
+      SAMPLE BY user_id
+      $settings"
+  for partition in $(ch "SELECT DISTINCT partition_id FROM system.parts
+                         WHERE database = currentDatabase() AND table = 'sessions_v2' AND active
+                         ORDER BY partition_id"); do
+    ch "ALTER TABLE sessions_v2_tmp_versioned ATTACH PARTITION ID '$partition' FROM sessions_v2"
+  done
+
+  # the new table must hold exactly the same rows
+  old=$(ch "SELECT count(), sum(sign) FROM sessions_v2 FORMAT CSV")
+  new=$(ch "SELECT count(), sum(sign) FROM sessions_v2_tmp_versioned FORMAT CSV")
+  [ "$old" = "$new" ] || { echo "sessions_v2_tmp_versioned has rows,sessions $new, sessions_v2 has $old: stopping" >&2; exit 1; }
+
+  if ! ch "EXCHANGE TABLES sessions_v2_tmp_versioned AND sessions_v2"; then
+    engine=$(ch "SELECT engine FROM system.tables WHERE database = currentDatabase() AND name = 'sessions_v2'")
+    [ "$engine" = "CollapsingMergeTree" ] || { echo "EXCHANGE failed and sessions_v2 is now '$engine': stopping" >&2; exit 1; }
+    echo "   EXCHANGE is not supported here, swapping the tables with two renames"
+    backup_table=sessions_v2_backup
+    if [ "$(ch "EXISTS TABLE $backup_table")" = "1" ]; then
+      backup_table="sessions_v2_backup_$(date -u +%Y%m%d%H%M%S)"
+    fi
+    ch "RENAME TABLE sessions_v2 TO $backup_table"
+    ch "RENAME TABLE sessions_v2_tmp_versioned TO sessions_v2"
+  fi
+  check_counts
+  mark_done "sessions-v2-versioned"
 }
 
 echo "-> starting Postgres"
 docker compose up -d --wait plausible_db
 
 clickhouse_to 23.8 24.3
+convert_sessions_v2
 migrate_with "$RELEASES:v2.1.0"
 migrate_with "$RELEASES:v2.1.1"
 migrate_with "$RELEASES:v2.1.5"
