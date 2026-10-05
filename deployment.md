@@ -735,6 +735,7 @@ visitor ids continuous.
 | Dashboard empty after the upgrade | You're probably running from another directory, so Compose created new empty volumes (`<newproject>_event-data`). Stop, `cd` to the original directory (or set `COMPOSE_PROJECT_NAME=<old project>` in `.env`) and start again. Your data is in the old volumes. |
 | `db migrate` is slow / ClickHouse uses lots of CPU | Mutations are rewriting data on a large dataset. Let it finish; `SELECT * FROM system.mutations WHERE is_done = 0` shows progress. |
 | Small server runs out of memory | Uncomment both `low-resources` mounts for ClickHouse in `docker-compose.yml`, and build the image elsewhere (5.2). |
+| No new visits after the upgrade; nginx shows `POST /api/event … 202`, the app logs `No such column revenue_source_amount` / `WriteBuffer terminating` | `events_v2` lacks columns. This is typical for installs that went through the v1 → v2 `NumericIDs` data migration: older releases skipped unknown columns on insert, newer ones fail. Run `./upgrade/check-columns.sh --fix`; it only adds columns, data is untouched. `migrate.sh` and `verify.sh` run this check. |
 | Same visitor still counted per day | `ENABLE_PERSISTENT_TRACKING` isn't `true` in the running container (`docker compose exec plausible env | grep PERSISTENT`), or the client doesn't send `deviceId` on every event. |
 
 ---

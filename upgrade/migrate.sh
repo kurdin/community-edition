@@ -250,5 +250,11 @@ if ! done_step "migrate-fork"; then
   mark_done "migrate-fork"
 fi
 
+# Some installs miss columns that a migration recorded as applied (e.g. after
+# an old v1 -> v2 data migration recreated events_v2). New events then can't
+# be stored. Add any missing optional ones (metadata only, data untouched).
+echo "-> checking the columns new events and sessions are written to"
+"$(dirname "$0")/check-columns.sh" --fix
+
 echo "MIGRATIONS OK"
 echo "Start Plausible with 'docker compose up -d', then run ./upgrade/verify.sh"

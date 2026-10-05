@@ -332,6 +332,20 @@ ClickHouse 23.8 → 24.3 → sessions_v2 conversion → CE v2.1.0 → v2.1.1 →
 After every step it prints `events,sessions = … (matches the backup)`.
 Long runs of `acquisition_channel_functions-NN Done!` are normal. If it
 stops, fix the cause and run it again: finished steps are skipped.
+
+The last step, `checking the columns new events and sessions are written to`,
+runs [`upgrade/check-columns.sh --fix`](./upgrade/check-columns.sh). It adds
+any missing columns. The data isn't touched; only the table definition
+changes. It ends with `COLUMNS OK`.
+
+Why this step exists: installs that went through the v1 → v2 data migration
+(`NumericIDs`) usually lack the four `revenue_*` columns in `events_v2`.
+That migration recreated the table without them, after the migration that
+adds them had already been recorded as done. Releases up to v2.1 hid this,
+because they skip unknown columns on insert. Newer releases name every
+column, so every write fails with `No such column revenue_source_amount`,
+even though the app keeps answering `202`. The fork also carries a migration
+that adds these columns when they're missing.
 For a progress summary:
 
 ```sh
@@ -347,13 +361,42 @@ curl -s http://127.0.0.1:8000/api/health; echo
 docker ps --format '{{.Names}}  {{.Image}}  {{.Ports}}' | grep 8000   # <new project>-plausible-1  plausible-deviceid:local
 ```
 
+`verify.sh` also checks that every column the app writes exists, and that
+the app logs no write errors. A dashboard can look fine while new events are
+being thrown away.
+
 Your site now serves the new version through the unchanged reverse proxy.
 Check:
 - login with 2FA;
 - the dashboards;
 - the realtime view, to see new visits arriving.
 
+To confirm directly that new events are stored (a recent time, count > 0):
+
+```sh
+docker compose exec -T plausible_events_db clickhouse-client -d plausible_events_db -q \
+  "SELECT max(timestamp), countIf(timestamp > now() - INTERVAL 5 MINUTE) FROM events_v2 WHERE timestamp >= today()"
+```
+
 Then start any stacks you paused in phase 1.
+
+### Already upgraded with an earlier version of these scripts?
+
+Earlier versions didn't check the columns. If your install was upgraded
+before `check-columns.sh` existed, check it now. This is safe on a running
+install:
+
+```sh
+cd "$NEW_DIR"
+git pull                                   # gets upgrade/check-columns.sh
+./upgrade/check-columns.sh                 # COLUMNS OK, or the list of missing columns
+./upgrade/check-columns.sh --fix           # only if something is missing: adds it, data untouched
+docker compose logs --since 1m plausible 2>&1 | grep -c 'No such column'    # 0
+```
+
+The app retries its write buffer every few seconds, so events are stored
+again within moments, with no restart needed. Events received while columns
+were missing were lost: the app accepted them but couldn't write them.
 
 ---
 
@@ -449,3 +492,4 @@ Take a backup first (`deployment.md` §6).
 | `migrate.sh` stops at a stage | Paste the end of `/root/migrate.log` into an issue; rerun after the fix (it resumes) |
 | `verify.sh` shows a diff | Fewer goals can be upstream de-duplication; anything else, roll back and investigate |
 | Port 8000 already in use when starting the new install | The old install is still up: `cd "$OLD_DIR" && docker compose down` |
+| No new visits after the upgrade, although nginx shows `POST /api/event … 202`; the log has `No such column revenue_source_amount` / `WriteBuffer terminating` | Columns missing from `events_v2`, typical after the old v1 → v2 data migration. Run `./upgrade/check-columns.sh --fix` (3.5) |
