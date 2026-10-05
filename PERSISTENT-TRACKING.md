@@ -80,9 +80,18 @@ docker compose up -d plausible
 
 # 4. check
 sleep 40
-docker compose logs plausible | grep -i persistent      # "Persistent tracking enabled, recording period start at ..."
 curl -s http://127.0.0.1:8000/api/health; echo
+docker compose exec plausible printenv ENABLE_PERSISTENT_TRACKING   # true
+docker compose exec plausible_db psql -U postgres -d plausible_db \
+  -c "SELECT id, started_at, ended_at FROM persistent_tracking_periods"
 ```
+
+Expect `true`, and a row whose `started_at` is the time of the restart
+(UTC) with an empty `ended_at`. Builds from `plausible-kurdin` after
+2026-10-05 also log
+`[notice] Persistent tracking enabled, recording period start at …`
+(`docker compose logs plausible | grep 'Persistent tracking'`). Older
+builds log it at `info` level, which the default `LOG_LEVEL=notice` hides.
 
 * The app **refuses to start** if the flag is on and `PERSISTENT_SALT_SECRET`
   is missing or shorter than 16 bytes. `docker compose logs plausible`
@@ -122,7 +131,9 @@ curl -s http://127.0.0.1:8000/api/health; echo
 ```sh
 sed -i 's/^ENABLE_PERSISTENT_TRACKING=.*/ENABLE_PERSISTENT_TRACKING=false/' plausible-conf.env
 docker compose up -d plausible
-sleep 40 && docker compose logs plausible | grep -i persistent   # "Persistent tracking disabled, recording period end at ..."
+sleep 40
+docker compose exec plausible_db psql -U postgres -d plausible_db \
+  -c "SELECT id, started_at, ended_at FROM persistent_tracking_periods"   # the open row now has an ended_at
 ```
 
 What happens:

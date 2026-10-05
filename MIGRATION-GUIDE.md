@@ -383,7 +383,10 @@ version in between stay in the new volumes.
    cd "$NEW_DIR"
    sed -i 's/^ENABLE_PERSISTENT_TRACKING=.*/ENABLE_PERSISTENT_TRACKING=true/' plausible-conf.env
    docker compose up -d plausible
-   sleep 40 && docker compose logs plausible | grep -i persistent    # "Persistent tracking enabled, recording period start ..."
+   sleep 40
+   docker compose exec plausible printenv ENABLE_PERSISTENT_TRACKING   # true
+   docker compose exec plausible_db psql -U postgres -d plausible_db \
+     -c "SELECT id, started_at, ended_at FROM persistent_tracking_periods"   # a row started now, ended_at empty
    ```
 3. **Send a stable `deviceId`** with every event. See `deployment.md` §2.8
    for the script tag and npm examples. Without it, visitors are
