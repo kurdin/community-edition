@@ -552,6 +552,11 @@ with **`UPGRADE VERIFIED`**. Then check by hand:
   `Facebook`); totals are unchanged.
 * Make sure new pageviews show up in the realtime view.
 
+Then run the post-migration checks, which are read-only and safe any time:
+`./upgrade/post-migration.sh`. It must end with `POST-MIGRATION CHECKS OK`.
+It checks that new events are actually stored and that the tables and
+config are right, then lists what can be cleaned up later.
+
 Take as long as you need: days, if you like. The backup stays until step 8.
 
 ### Step 7: not happy? Roll back
@@ -573,7 +578,9 @@ before this point keeps its daily-rotating ids. Visitors who come back on
 later days are now counted once over multi-day ranges.
 
 When you no longer need a way back, delete the backup and the upgrade
-leftovers:
+leftovers. `./upgrade/post-migration.sh --cleanup` does this: it runs
+`finalize.sh` below, then also drops empty v1 tables and removes the
+migration-only images (see MIGRATION-GUIDE.md, phase 5). Or run just:
 
 ```sh
 ./upgrade/finalize.sh

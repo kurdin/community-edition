@@ -46,7 +46,7 @@ path, with the lessons learned on the way.
 | 1 | Prepare: BuildKit, build the image, download images | online |
 | 2 | Rehearse on a copy (optional) | online (down ~1 min for the copy) |
 | 3 | Switch over | **down a few minutes** |
-| 4 | Verify, enable persistent tracking | — |
+| 4 | Post-migration checks, enable persistent tracking | — |
 | 5 | Clean up (after a week or so) | deleted |
 
 Run everything as root (or with `sudo`) on the server. Run long steps inside
@@ -372,12 +372,28 @@ Check:
 - the dashboards;
 - the realtime view, to see new visits arriving.
 
-To confirm directly that new events are stored (a recent time, count > 0):
+A few minutes after the switch, once visits have arrived, run the
+post-migration checks:
 
 ```sh
-docker compose exec -T plausible_events_db clickhouse-client -d plausible_events_db -q \
-  "SELECT max(timestamp), countIf(timestamp > now() - INTERVAL 5 MINUTE) FROM events_v2 WHERE timestamp >= today()"
+./upgrade/post-migration.sh                # must end with POST-MIGRATION CHECKS OK
 ```
+
+[`upgrade/post-migration.sh`](./upgrade/post-migration.sh) is read-only and
+safe to run any time, also days later. It checks:
+
+| Check | OK means |
+| --- | --- |
+| app | the `plausible` container runs `plausible-deviceid:local` and its health check is ready |
+| new events stored | events in the last 15 minutes (a warning, not a failure, if your sites had no traffic) and no `No such column` / `WriteBuffer` errors in the app log |
+| tables | every column the app writes and the `sessions_v2` index exist (`check-columns.sh`); `events_v2` is `MergeTree`, `sessions_v2` is `VersionedCollapsingMergeTree` |
+| configuration | `BASE_URL` and `SECRET_KEY_BASE` aren't empty or `replace-me`; with persistent tracking on, the secret is set and a tracking period is open |
+
+Then it lists what phase 5 can remove:
+- leftover tables;
+- the upgrade backup and its size;
+- migration-only images;
+- the old install's data volumes.
 
 Then start any stacks you paused in phase 1.
 
@@ -486,17 +502,49 @@ docker compose exec plausible_events_db clickhouse-client -q \
 
 ## Phase 5: clean up (after a week or so)
 
-Only when you're sure you won't roll back:
+Only when you're sure you won't roll back. Everything runs from the new
+install's folder.
+
+**5.1 Clean up the new install.** This removes the upgrade backup, the
+leftover tables and the migration-only images:
 
 ```sh
-cd "$NEW_DIR" && ./upgrade/finalize.sh               # deletes this install's backup and conversion leftovers
-cd "$OLD_DIR" && docker compose down -v              # deletes the OLD data: point of no return
-for v in v2.1.0 v2.1.1 v2.1.5 v3.0.1 v3.1.0 v3.2.0; do docker rmi ghcr.io/plausible/community-edition:$v; done
-for v in 23.3.7.5 23.8 24.3 24.8; do docker rmi clickhouse/clickhouse-server:$v-alpine; done
+cd "$NEW_DIR"
+./upgrade/post-migration.sh --cleanup      # asks you to type "cleanup"; ends with CLEANUP DONE
 ```
 
+It only runs when all post-migration checks pass. Then it:
+1. runs [`finalize.sh`](./upgrade/finalize.sh). That re-checks the data
+   against the pre-upgrade baseline and refuses if anything from before the
+   upgrade changed. Then it deletes the backup directory, the `sessions_v2`
+   conversion leftover, the empty v1 → v2 leftovers (`tmp_events_v2`,
+   `tmp_sessions_v2`, `domains_lookup`), the `db-data-pg14` volume and
+   `upgrade.vars`;
+2. drops the empty v1 tables `events` and `sessions` (only when they have 0
+   rows);
+3. removes images only the migration used: CE v2.1.0 to v3.2.0, and
+   ClickHouse 23.8, 24.3 and 24.8.
+
+**5.2 Remove the old install.** This is the point of no return: rollback
+is no longer possible.
+
+```sh
+./upgrade/post-migration.sh --remove-old-install "$OLD_DIR"   # asks you to type the old project name
+```
+
+The script refuses if:
+- `$OLD_DIR` is the new install itself;
+- the old install still has containers. Run `docker compose down` there
+  first.
+
+It always asks for the old project name, even with `--yes`. Then it deletes
+the old install's containers and data volumes, plus its images when the new
+install doesn't use them. `postgres:14-alpine` and `bytemark/smtp` stay.
 You can delete the old folder afterwards. Keep the new folder's name: it is
 the Compose project name of your data volumes.
+
+Finally, `./upgrade/post-migration.sh` should end with
+`POST-MIGRATION CHECKS OK` and list no leftovers.
 
 ---
 
@@ -529,4 +577,5 @@ Take a backup first (`deployment.md` §6).
 | `migrate.sh` stops at a stage | Paste the end of `/root/migrate.log` into an issue; rerun after the fix (it resumes) |
 | `verify.sh` shows a diff | Fewer goals can be upstream de-duplication; anything else, roll back and investigate |
 | Port 8000 already in use when starting the new install | The old install is still up: `cd "$OLD_DIR" && docker compose down` |
+| `post-migration.sh` warns "no events in the last 15 minutes" | Normal if your sites had no traffic in that time. Otherwise check the tracking snippet points at your instance, and look in `docker compose logs plausible` |
 | No new visits after the upgrade, although nginx shows `POST /api/event … 202`; the log has `No such column revenue_source_amount` / `WriteBuffer terminating` | Columns missing from `events_v2`, typical after the old v1 → v2 data migration. Run `./upgrade/check-columns.sh --fix` (3.5) |
