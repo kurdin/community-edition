@@ -42,6 +42,16 @@ set -eu
 : "${PROJECT:?}" "${BACKUP:?}"
 [ -f "$BACKUP/before.txt" ] || { echo "$BACKUP/before.txt not found: run upgrade/backup.sh first" >&2; exit 1; }
 
+# Installs that ran a v2.1 release or RC encrypt 2FA secrets with TOTP_VAULT_KEY.
+# Without the same key in the new config, users with 2FA could no longer log in.
+old_totp=$(sed -n 's/^TOTP_VAULT_KEY=//p' "$BACKUP/config/plausible-conf.env" 2> /dev/null | tail -n 1)
+new_totp=$(sed -n 's/^TOTP_VAULT_KEY=//p' plausible-conf.env 2> /dev/null | tail -n 1)
+if [ -n "$old_totp" ] && [ "$old_totp" != "$new_totp" ]; then
+  echo "TOTP_VAULT_KEY in plausible-conf.env is missing or differs from your old config." >&2
+  echo "Copy it exactly from $BACKUP/config/plausible-conf.env, then rerun." >&2
+  exit 1
+fi
+
 RELEASES="ghcr.io/plausible/community-edition"
 STAGE_FILE=$(cd "$(dirname "$0")" && pwd)/stage-image.yml
 DONE="$BACKUP/migrate.done"

@@ -237,7 +237,10 @@ Details and API examples: the fork's
 
 This is for installs made from the original `plausible/community-edition`
 v2.0 setup (`plausible/analytics:v2.0`, `postgres:14-alpine`,
-`clickhouse/clickhouse-server:23.3.7.5-alpine`).
+`clickhouse/clickhouse-server:23.3.7.5-alpine`). Installs already on a v2.1
+release or release candidate (`ghcr.io/plausible/community-edition:v2.1.*`)
+follow the same steps. Migrations that already ran are skipped. Copy
+`TOTP_VAULT_KEY` in step 3.
 
 ### The short version
 
@@ -308,6 +311,50 @@ dataset (real Postgres 14 and ClickHouse 23.3.7.5 volumes):
 official release images and the fork image (they couldn't be downloaded or
 built there). The stages' migrations are the same ones every upstream CE
 install ran when upgrading release by release.
+
+### Optional: rehearse on a copy first
+
+Never run the new version on the live volumes next to the old one: the
+migrations are one-way. To try the whole upgrade first, run it on a copy
+under another project name and port. Live stays down only while the volumes
+are copied.
+
+```sh
+cd /path/to                                      # parent of your install, e.g. /home/gits
+cp -a plausible plausible-test                   # folder name = Compose project name
+cd plausible-test
+[ -f .env ] && sed -i '/^COMPOSE_PROJECT_NAME=/d' .env   # must not point at the live project
+docker compose config | grep '^name:'            # must print: name: plausible-test
+cat > docker-compose.override.yml <<'YML'
+services:
+  plausible:
+    ports: !override
+      - 127.0.0.1:8001:8000
+YML
+# the copy must never email your users, and is opened via an SSH tunnel
+sed -i -e 's|^BASE_URL=.*|BASE_URL=http://localhost:8001|' \
+       -e 's|^SMTP_HOST_PORT=.*|SMTP_HOST_PORT=1|' plausible-conf.env
+grep -q '^SMTP_HOST_PORT=' plausible-conf.env || echo 'SMTP_HOST_PORT=1' >> plausible-conf.env
+
+(cd ../plausible && docker compose stop)         # live down
+for v in db-data event-data event-logs; do
+  docker run --rm -v "plausible_$v:/from:ro" -v "plausible-test_$v:/to" alpine cp -a /from/. /to/
+done
+(cd ../plausible && docker compose up -d)        # live back up
+
+docker compose up -d                             # the old version, on the copy
+```
+
+Replace `plausible` with your install's folder (project) name; `docker
+compose ls` lists it. Compose warns that the copied volumes weren't created
+by Compose; that's expected.
+
+Then follow steps 1–6 below inside `plausible-test`. In step 3, keep the
+`BASE_URL` and `SMTP_HOST_PORT` test values. Open the copy with
+`ssh -L 8001:127.0.0.1:8001 you@server` and http://localhost:8001. Time the
+steps: the backup and migration times are the downtime you'll have for
+real. Remove the copy **from inside `plausible-test`** with
+`docker compose down -v`, then delete the folder.
 
 ### Step 1: prepare (app still online)
 
@@ -405,6 +452,9 @@ Edit `plausible-conf.env`:
 * Copy **`BASE_URL` and `SECRET_KEY_BASE` exactly** from the old file
   (`$BACKUP/config/plausible-conf.env`). Don't generate a new
   `SECRET_KEY_BASE`.
+* Copy **`TOTP_VAULT_KEY` exactly** if your old file has one (any v2.1
+  release or RC). It encrypts 2FA secrets: without it, users with 2FA can't
+  log in. `migrate.sh` refuses to run if it's missing or different.
 * Copy any other variables you had set (Google integration, `MAXMIND_*`,
   `DISABLE_REGISTRATION`, `MAILER_EMAIL`, SMTP credentials, …).
 * If you had `MAILER_ADAPTER=Bamboo.SMTPAdapter`, change it to `Bamboo.Mua`.
