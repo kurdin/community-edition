@@ -194,10 +194,15 @@ convert_sessions_v2() {
     ch "ALTER TABLE sessions_v2_tmp_versioned ATTACH PARTITION ID '$partition' FROM sessions_v2"
   done
 
-  # the new table must hold exactly the same rows
-  old=$(ch "SELECT count(), sum(sign) FROM sessions_v2 FORMAT CSV")
-  new=$(ch "SELECT count(), sum(sign) FROM sessions_v2_tmp_versioned FORMAT CSV")
-  [ "$old" = "$new" ] || { echo "sessions_v2_tmp_versioned has rows,sessions $new, sessions_v2 has $old: stopping" >&2; exit 1; }
+  # the new table must hold the same sessions. Background merges may already
+  # have dropped cancelled +1/-1 pairs from either table (differently per
+  # engine), so physical row counts can differ. Compare totals such a pair
+  # cancels out of: sessions, and a signed checksum of the sorting key that
+  # every collapsed pair shares.
+  totals="SELECT sum(sign), sum(toInt128(sign) * cityHash64(site_id, toDate(start), user_id, session_id))"
+  old=$(ch "$totals FROM sessions_v2 FORMAT CSV")
+  new=$(ch "$totals FROM sessions_v2_tmp_versioned FORMAT CSV")
+  [ "$old" = "$new" ] || { echo "sessions_v2_tmp_versioned has sessions,checksum $new, sessions_v2 has $old: stopping" >&2; exit 1; }
 
   if ! ch "EXCHANGE TABLES sessions_v2_tmp_versioned AND sessions_v2"; then
     engine=$(ch "SELECT engine FROM system.tables WHERE database = currentDatabase() AND name = 'sessions_v2'")

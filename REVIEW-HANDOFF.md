@@ -1,7 +1,7 @@
 # Combined review handoff: persistent tracking, lossless upgrade, DAU/WAU/MAU
 
 This is a single, self-contained handoff for everything built so far, plus all
-review findings and their fixes (rounds 1–7). You're reviewing the final
+review findings and their fixes (rounds 1–8). You're reviewing the final
 state. **Report findings only; don't change files.**
 
 ## 1. Repositories, branch, commits
@@ -38,9 +38,10 @@ Whole feature: `git diff d21298d..3a8c83b`. By area: `git diff d21298d..534f84c`
 | `a4f7aeb` | Default `PLAUSIBLE_SRC` = feature branch |
 | `c6f45ef`…`d5cbc53` | Handoffs; DAU/WAU/MAU docs |
 | `967c4b0` | Round 6 fixes (v2.1.0 stage, rollback archives, cutoff for Postgres counts, quoting, Compose minimum) |
-| HEAD | Round 7 fixes (TOTP key for v2.1.0/v2.1.1, `sessions_v2` pre-conversion, baseline with cutoff) + this file |
+| `5f939a6` | Round 7 fixes (TOTP key for v2.1.0/v2.1.1, `sessions_v2` pre-conversion, baseline with cutoff) |
+| HEAD | Round 8 fix (merge-safe conversion check) + this file |
 
-Whole feature: `git diff 06f122f..HEAD`. Round 7 only: `git diff 967c4b0..HEAD`.
+Whole feature: `git diff 06f122f..HEAD`. Round 7: `git diff 967c4b0..5f939a6`. Round 8: `git diff 5f939a6..HEAD`.
 
 ## 2. What was built
 
@@ -219,6 +220,7 @@ Whole feature: `git diff 06f122f..HEAD`. Round 7 only: `git diff 967c4b0..HEAD`.
 | 7 | `SINCE` seed stayed open forever after a disabled first boot | Stored as a real period at boot (`periods.ex`) + tests |
 | 7 | Comparison period coverage ignored | Checked too; `scope: :comparison` warning (`query_builder.ex`, `query_result.ex`, `top-stats.js`) + test |
 | 7 | Coverage used the interval spanning all reported windows | Per window via `ActiveUsers.reported_windows/2` + test |
+| 8 | Conversion compared physical `count()`; background merges collapse +1/-1 pairs differently per engine, so a valid upgrade could stop | Compare `sum(sign)` and `sum(toInt128(sign) * cityHash64(<sorting key>))`, which collapsed pairs cancel out of (`migrate.sh`) |
 
 ## 4. Verification
 
@@ -268,6 +270,15 @@ Whole feature: `git diff 06f122f..HEAD`. Round 7 only: `git diff 967c4b0..HEAD`.
     renames, rerun finished the swap, `finalize` dropped both leftovers;
   - the throwaway key reached only v2.1.0/v2.1.1; an existing key in
     `plausible-conf.env` was used as is.
+- **Round 8 rehearsals** (fresh data with 2000 cancel pairs, a merge forced
+  with `OPTIMIZE ... FINAL` right after the attach, rehearsal copies only):
+  - the round 7 check stopped a valid upgrade (24001 vs 20001 rows,
+    20001 sessions on both);
+  - the new check passed with a merge on the source table and with one on
+    the new table;
+  - rows deleted from the new table were still caught, leaving `sessions_v2`
+    untouched;
+  - the unmodified full flow passed backup → migrate → verify → finalize.
 - `docker compose config` passes for both repos, including the arm64
   override.
 
