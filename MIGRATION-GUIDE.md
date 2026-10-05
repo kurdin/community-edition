@@ -335,8 +335,9 @@ stops, fix the cause and run it again: finished steps are skipped.
 
 The last step, `checking the columns new events and sessions are written to`,
 runs [`upgrade/check-columns.sh --fix`](./upgrade/check-columns.sh). It adds
-any missing columns. The data isn't touched; only the table definition
-changes. It ends with `COLUMNS OK`.
+any missing columns and the `sessions_v2` timestamp index. The data isn't
+touched; only the table definition and the index change. It ends with
+`COLUMNS OK`.
 
 Why this step exists: installs that went through the v1 → v2 data migration
 (`NumericIDs`) usually lack the four `revenue_*` columns in `events_v2`.
@@ -380,6 +381,42 @@ docker compose exec -T plausible_events_db clickhouse-client -d plausible_events
 
 Then start any stacks you paused in phase 1.
 
+### Installs that started on Plausible v1
+
+If your install ever ran Plausible v1, it went through the v1 → v2 data
+migration (`NumericIDs`). You can tell: ClickHouse still has empty `events`
+and `sessions` tables next to `events_v2` and `sessions_v2`. That migration
+**dropped and recreated `events_v2` and `sessions_v2`** from its own
+templates. Anything a regular migration had already added to those tables
+was lost, while the migration itself stayed recorded as done:
+
+| Lost by `NumericIDs` | Effect | Handled by |
+| --- | --- | --- |
+| `revenue_*` columns in `events_v2` | new releases can't store any event | `check-columns.sh --fix` (run by `migrate.sh`) and the fork migration `ensure_write_columns` |
+| `minmax_timestamp` index on `sessions_v2` | slower queries only | same |
+| `VersionedCollapsingMergeTree` engine of `sessions_v2` | session counts | the `sessions_v2` conversion in `migrate.sh` |
+
+It also left three empty tables behind: `tmp_events_v2`, `tmp_sessions_v2`
+and `domains_lookup`. `finalize.sh` drops them, together with the conversion
+leftover `sessions_v2_tmp_versioned`. The empty v1 tables `events` and
+`sessions` are harmless. CE keeps them on purpose, and you can drop them
+yourself once you've confirmed they hold 0 rows.
+
+To check an install by hand (read-only):
+
+```sh
+cq() { docker compose exec -T plausible_events_db clickhouse-client -d plausible_events_db -q "$1" < /dev/null; }
+cq "SELECT name, engine, sorting_key FROM system.tables WHERE database = currentDatabase() AND name IN ('events_v2','sessions_v2')"
+cq "SELECT table, name FROM system.data_skipping_indices WHERE database = currentDatabase()"   # sessions_v2 minmax_timestamp
+cq "SELECT name, total_rows FROM system.tables WHERE database = currentDatabase()
+    AND name IN ('events','sessions','tmp_events_v2','tmp_sessions_v2','domains_lookup')"
+./upgrade/check-columns.sh                                                                     # COLUMNS OK
+```
+
+`events_v2` should be a `MergeTree` and `sessions_v2` a
+`VersionedCollapsingMergeTree`. Its sort key ends in `events`, which the
+engine adds automatically.
+
 ### Already upgraded with an earlier version of these scripts?
 
 Earlier versions didn't check the columns. If your install was upgraded
@@ -389,7 +426,7 @@ install:
 ```sh
 cd "$NEW_DIR"
 git pull                                   # gets upgrade/check-columns.sh
-./upgrade/check-columns.sh                 # COLUMNS OK, or the list of missing columns
+./upgrade/check-columns.sh                 # COLUMNS OK, or the list of missing columns/index
 ./upgrade/check-columns.sh --fix           # only if something is missing: adds it, data untouched
 docker compose logs --since 1m plausible 2>&1 | grep -c 'No such column'    # 0
 ```

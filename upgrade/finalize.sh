@@ -12,6 +12,8 @@
 #   * the backup directory ($BACKUP from upgrade.vars)
 #   * the ClickHouse table left by the sessions_v2 engine conversion
 #     (sessions_v2_tmp_versioned or sessions_v2_backup[_<time>])
+#   * empty leftovers of the old v1 -> v2 data migration
+#     (tmp_events_v2, tmp_sessions_v2, domains_lookup)
 #   * the ${PROJECT}_db-data-pg14 volume (only exists after a Postgres 16 move)
 #   * upgrade.vars
 # After this, rolling back is no longer possible.
@@ -65,6 +67,10 @@ esac
 leftovers=$(docker compose exec -T plausible_events_db clickhouse-client -d plausible_events_db \
   -q "SELECT name FROM system.tables WHERE database = currentDatabase()
         AND (name = 'sessions_v2_tmp_versioned' OR name LIKE 'sessions\\_v2\\_backup%')" < /dev/null)
+# empty leftovers of the old v1 -> v2 data migration (NumericIDs), if present
+leftovers="$leftovers $(docker compose exec -T plausible_events_db clickhouse-client -d plausible_events_db \
+  -q "SELECT name FROM system.tables WHERE database = currentDatabase()
+        AND name IN ('tmp_events_v2', 'tmp_sessions_v2', 'domains_lookup') AND total_rows = 0" < /dev/null)"
 for table in $leftovers; do
   docker compose exec -T plausible_events_db clickhouse-client -d plausible_events_db \
     -q "DROP TABLE IF EXISTS $table" < /dev/null

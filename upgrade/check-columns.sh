@@ -1,6 +1,7 @@
 #!/bin/sh
 # Checks that the ClickHouse tables have every column the app writes, so new
-# events and sessions can be stored (MIGRATION-GUIDE.md, troubleshooting).
+# events and sessions can be stored, and the sessions_v2 timestamp index
+# (MIGRATION-GUIDE.md, troubleshooting).
 #
 #   ./upgrade/check-columns.sh          # report only; non-zero exit if something is missing
 #   ./upgrade/check-columns.sh --fix    # also add missing optional columns
@@ -11,7 +12,9 @@
 # (HTTP 202) but can't store them: "No such column revenue_source_amount".
 # --fix adds those columns with ADD COLUMN IF NOT EXISTS: a metadata-only
 # change that doesn't rewrite or touch existing data. Missing core columns
-# can't be fixed this way and are only reported.
+# can't be fixed this way and are only reported. The v1 -> v2 data migration
+# also recreated sessions_v2 without its minmax_timestamp index (slower
+# queries only); --fix adds and builds it.
 # Prints "COLUMNS OK" when everything is present.
 set -eu
 
@@ -67,5 +70,18 @@ done <<EOF
 $ADDABLE
 EOF
 
-[ "$problems" -eq 0 ] || { echo "columns are missing: new events can't be stored" >&2; exit 1; }
+index=$(ch "SELECT count() FROM system.data_skipping_indices
+            WHERE database = currentDatabase() AND table = 'sessions_v2' AND name = 'minmax_timestamp'")
+if [ "$index" = "0" ]; then
+  if [ "$FIX" = true ]; then
+    ch "ALTER TABLE sessions_v2 ADD INDEX IF NOT EXISTS minmax_timestamp timestamp TYPE minmax GRANULARITY 1"
+    ch "ALTER TABLE sessions_v2 MATERIALIZE INDEX minmax_timestamp SETTINGS mutations_sync = 1"
+    echo "   added and built index sessions_v2.minmax_timestamp"
+  else
+    echo "MISSING index sessions_v2.minmax_timestamp (slower queries only; fix: ./upgrade/check-columns.sh --fix)" >&2
+    problems=1
+  fi
+fi
+
+[ "$problems" -eq 0 ] || { echo "columns or indexes are missing (see above)" >&2; exit 1; }
 echo "COLUMNS OK"
