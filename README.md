@@ -62,6 +62,11 @@ as `PLAUSIBLE_SRC=../plausible-analytics-deviceId`.
 **Migrating an existing install?** Follow [MIGRATION-GUIDE.md](./MIGRATION-GUIDE.md):
 the step-by-step path that was used on a real v2.1.0-rc.0 server.
 
+**Unique visitors, `deviceId` and DAU/WAU/MAU:** see
+[PERSISTENT-TRACKING.md](./PERSISTENT-TRACKING.md). It explains how
+visitors are identified, how to turn tracking on or off, what to change in
+apps and websites, and the new reports.
+
 Upgrading an existing v2.0 install keeps the same service and volume names.
 ClickHouse 23.3 data is upgraded in place to 24.12. The Postgres volume was
 created with Postgres 14, so either set `POSTGRES_VERSION=14` in `.env` or

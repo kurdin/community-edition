@@ -158,6 +158,10 @@ Apache). Make sure `BASE_URL` matches the public URL.
 
 ### 2.8 Send the device id (when persistent tracking is on)
 
+> The complete guide to unique visitors (identification, turning tracking
+> on and off, apps vs. websites, reports, privacy) is
+> [PERSISTENT-TRACKING.md](./PERSISTENT-TRACKING.md).
+
 Pass the id as a custom property on **every** event, pageviews included. An
 event without it falls back to an IP + user-agent id, which is different from
 the device id.

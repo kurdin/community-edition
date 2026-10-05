@@ -371,6 +371,10 @@ version in between stay in the new volumes.
 
 ## Phase 4: enable persistent tracking
 
+> Full details: [PERSISTENT-TRACKING.md](./PERSISTENT-TRACKING.md) covers
+> how visitors are identified, turning it on and off, sending `deviceId`
+> from apps and websites, and the new reports.
+
 1. **Back up the new `plausible-conf.env` off the server.** It holds
    `PERSISTENT_SALT_SECRET`, which must never change: a new secret makes
    every visitor look new.
