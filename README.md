@@ -51,15 +51,16 @@ Send it on every event, e.g. `plausible.init({ customProperties: { deviceId } })
 
 ```console
 $ $EDITOR plausible-conf.env      # BASE_URL, SECRET_KEY_BASE, PERSISTENT_SALT_SECRET
-$ echo 'PLAUSIBLE_SRC=https://github.com/kurdin/plausible-analytics-deviceid.git#claude/determined-cerf-dqrxgj' > .env
+$ echo 'PLAUSIBLE_SRC=https://github.com/kurdin/plausible-analytics-deviceid.git#plausible-kurdin' > .env
 $ docker compose up -d --build    # builds the fork from GitHub
 ```
 
 `PLAUSIBLE_SRC` picks the source to build. The compose default is the
-feature branch shown above. Other options are a tag, or a local checkout such
-as `PLAUSIBLE_SRC=../plausible-analytics-deviceId`. Don't build the fork's
-`master` before the feature is merged into it: that's plain upstream
-Plausible, which silently ignores `ENABLE_PERSISTENT_TRACKING`.
+`plausible-kurdin` branch shown above. Other options are a tag, or a local checkout such
+as `PLAUSIBLE_SRC=../plausible-analytics-deviceId`.
+
+**Migrating an existing install?** Follow [MIGRATION-GUIDE.md](./MIGRATION-GUIDE.md):
+the step-by-step path that was used on a real v2.1.0-rc.0 server.
 
 Upgrading an existing v2.0 install keeps the same service and volume names.
 ClickHouse 23.3 data is upgraded in place to 24.12. The Postgres volume was
@@ -78,7 +79,7 @@ then finalize or roll back); see
 **Step-by-step install, upgrade-from-v2.0 (no data loss) and rollback
 instructions: [deployment.md](./deployment.md).**
 
-See the fork's [`deploy/README.md`](https://github.com/kurdin/plausible-analytics-deviceid/blob/claude/determined-cerf-dqrxgj/deploy/README.md)
+See the fork's [`deploy/README.md`](https://github.com/kurdin/plausible-analytics-deviceid/blob/plausible-kurdin/deploy/README.md)
 for how it works and the step-by-step verification (`curl` + Stats API).
 
 > [!IMPORTANT]

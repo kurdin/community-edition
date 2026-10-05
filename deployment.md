@@ -11,16 +11,15 @@ This guide covers:
 7. [Troubleshooting](#7-troubleshooting)
 8. [Configuration reference](#8-configuration-reference)
 
-> **Branches.** Until these changes are merged, they live on the
-> `claude/determined-cerf-dqrxgj` branch of both
+> **Branches.** The deployment files and the app live on the
+> `plausible-kurdin` branch of both
 > [kurdin/community-edition](https://github.com/kurdin/community-edition) and
 > [kurdin/plausible-analytics-deviceid](https://github.com/kurdin/plausible-analytics-deviceid).
-> The commands below use two variables. Set them once per shell, and change
-> them to the merged branch or tag later:
+> The commands below use two variables. Set them once per shell:
 >
 > ```sh
-> DEPLOY_REF=claude/determined-cerf-dqrxgj   # branch of kurdin/community-edition
-> APP_REF=claude/determined-cerf-dqrxgj      # branch/tag of kurdin/plausible-analytics-deviceid
+> DEPLOY_REF=plausible-kurdin   # branch of kurdin/community-edition
+> APP_REF=plausible-kurdin      # branch/tag of kurdin/plausible-analytics-deviceid
 > ```
 
 ---
@@ -124,8 +123,8 @@ You can switch later at any time.
 
 `PLAUSIBLE_SRC` in `.env` (written in 2.2) decides what gets built. Compose
 reads `.env` for variable substitution; it is a different file from
-`plausible-conf.env`. Without it the default is the feature branch
-`https://github.com/kurdin/plausible-analytics-deviceid.git#claude/determined-cerf-dqrxgj`. Point it
+`plausible-conf.env`. Without it the default is the `plausible-kurdin` branch
+`https://github.com/kurdin/plausible-analytics-deviceid.git#plausible-kurdin`. Point it
 at any branch, tag or commit, or at a local checkout:
 
 ```sh
@@ -229,11 +228,16 @@ PERSISTENT_TRACKING_SINCE=2026-10-05
 ```
 
 Details and API examples: the fork's
-[`deploy/README.md`](https://github.com/kurdin/plausible-analytics-deviceid/blob/claude/determined-cerf-dqrxgj/deploy/README.md#active-users-dau-wau-mau).
+[`deploy/README.md`](https://github.com/kurdin/plausible-analytics-deviceid/blob/plausible-kurdin/deploy/README.md#active-users-dau-wau-mau).
 
 ---
 
 ## 3. Upgrading an existing Docker install without data loss
+
+> **Step-by-step version:** [MIGRATION-GUIDE.md](./MIGRATION-GUIDE.md) is the
+> path used on a real server. It copies the data to a new install and
+> switches over, so the old install stays untouched as the way back. This
+> section describes the in-place variant and what each script does.
 
 This is for installs made from the original `plausible/community-edition`
 v2.0 setup (`plausible/analytics:v2.0`, `postgres:14-alpine`,
@@ -366,8 +370,8 @@ name, which prefixes the volume names, so don't move it.
 cd /path/to/your/plausible        # e.g. ~/hosting
 docker compose ps                 # plausible, plausible_db, plausible_events_db, mail
 
-DEPLOY_REF=claude/determined-cerf-dqrxgj     # branch/tag of kurdin/community-edition
-APP_REF=claude/determined-cerf-dqrxgj        # branch/tag of kurdin/plausible-analytics-deviceid
+DEPLOY_REF=plausible-kurdin     # branch/tag of kurdin/community-edition
+APP_REF=plausible-kurdin        # branch/tag of kurdin/plausible-analytics-deviceid
 
 # a) get the upgrade scripts. This only adds files under upgrade/; nothing else changes yet
 git remote add deviceid https://github.com/kurdin/community-edition.git
@@ -746,7 +750,7 @@ Compose variables (in `.env`, next to `docker-compose.yml`):
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `PLAUSIBLE_SRC` | `https://github.com/kurdin/plausible-analytics-deviceid.git#claude/determined-cerf-dqrxgj` | Build context for the app image (git URL with `#ref`, or a local path). |
+| `PLAUSIBLE_SRC` | `https://github.com/kurdin/plausible-analytics-deviceid.git#plausible-kurdin` | Build context for the app image (git URL with `#ref`, or a local path). |
 | `POSTGRES_VERSION` | `16` | Postgres major version. Use `14` to keep an existing v14 volume. |
 | `CLICKHOUSE_VERSION` | `24.12` | ClickHouse image version. |
 | `COMPOSE_PROJECT_NAME` | directory name | Pins the volume name prefix if you move the directory. |
